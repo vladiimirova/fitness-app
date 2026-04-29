@@ -3,6 +3,7 @@ import LandingPage from '../pages/LandingPage/LandingPage';
 import LoginPage from '../pages/LoginPage/LoginPage';
 import RegisterPage from '../pages/RegisterPage/RegisterPage';
 import DashboardPage from '../pages/DashboardPage/DashboardPage';
+import ProfilePage from '../pages/ProfilePage/ProfilePage';
 import ProtectedRoute from './ProtectedRoute';
 
 function AppRouter() {
@@ -17,6 +18,14 @@ function AppRouter() {
           element={
             <ProtectedRoute>
               <DashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/profile"
+          element={
+            <ProtectedRoute>
+              <ProfilePage />
             </ProtectedRoute>
           }
         />

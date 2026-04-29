@@ -47,13 +47,16 @@ type FullTrainingPlan = {
   weeks: WeekPlan[];
 } | null;
 
-type DashboardTab = 'training' | 'nutrition' | 'progress' | 'profile';
+type DashboardTab = 'training' | 'nutrition' | 'progress';
+
+const avatarStorageKey = 'profileAvatar';
 
 function DashboardPage() {
   const navigate = useNavigate();
   const token = localStorage.getItem('token') || '';
 
   const [profileData, setProfileData] = useState<ProfileData>(null);
+  const [avatar, setAvatar] = useState<string>('');
   const [fullPlan, setFullPlan] = useState<FullTrainingPlan>(null);
   const [activeWeek, setActiveWeek] = useState<number>(1);
   const [loading, setLoading] = useState<boolean>(true);
@@ -69,6 +72,12 @@ function DashboardPage() {
 
       try {
         setLoading(true);
+
+        const storedAvatar = localStorage.getItem(avatarStorageKey);
+
+        if (storedAvatar) {
+          setAvatar(storedAvatar);
+        }
 
         const profile = await getMyProfile(token);
         setProfileData(profile);
@@ -168,18 +177,6 @@ function DashboardPage() {
     return experienceLevel;
   }
 
-  function getGenderLabel(gender: string) {
-    if (gender === 'female') {
-      return 'Жіноча';
-    }
-
-    if (gender === 'male') {
-      return 'Чоловіча';
-    }
-
-    return gender;
-  }
-
   function getDayTitle(dayNumber: number) {
     return `День ${dayNumber}`;
   }
@@ -190,6 +187,18 @@ function DashboardPage() {
     }
 
     return name.trim().charAt(0).toUpperCase();
+  }
+
+  function renderAvatar(className: string, imageClassName = 'h-full w-full object-cover') {
+    return (
+      <div className={className}>
+        {avatar ? (
+          <img src={avatar} alt="Аватар профілю" className={imageClassName} />
+        ) : (
+          getInitials(profileData?.name)
+        )}
+      </div>
+    );
   }
 
   const activeWeekData = useMemo(function () {
@@ -225,27 +234,19 @@ function DashboardPage() {
               type="button"
               onClick={handleOpenProfile}
               className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 transition hover:bg-white/10"
+              aria-label="Налаштування профілю"
+              title="Налаштування профілю"
             >
-              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-sm font-bold text-white">
-                {getInitials(profileData?.name)}
-              </div>
+              {renderAvatar(
+                'flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-sm font-bold text-white',
+              )}
 
               <div className="text-left">
                 <p className="text-sm font-medium text-white">
                   {profileData?.name || 'Профіль'}
                 </p>
-                <p className="text-xs text-slate-400">Редагувати</p>
+                <p className="text-xs text-slate-400">Налаштування</p>
               </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleOpenProfile}
-              className="flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-lg transition hover:bg-white/10"
-              aria-label="Налаштування профілю"
-              title="Налаштування профілю"
-            >
-              ⚙️
             </button>
 
             <button
@@ -272,28 +273,13 @@ function DashboardPage() {
             <section className="mb-8 rounded-[28px] border border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.14),_transparent_30%),radial-gradient(circle_at_top_right,_rgba(139,92,246,0.16),_transparent_30%),rgba(255,255,255,0.04)] p-6 shadow-[0_0_35px_rgba(34,211,238,0.06)] backdrop-blur sm:p-8">
               <div className="grid gap-6 lg:grid-cols-[1.2fr_0.9fr]">
                 <div>
-                  <div className="mb-5 flex items-center gap-4">
-                    <button
-                      type="button"
-                      onClick={handleOpenProfile}
-                      className="flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-2xl font-bold text-white shadow-lg shadow-cyan-500/10 transition hover:scale-[1.02]"
-                    >
-                      {getInitials(profileData?.name)}
-                    </button>
-
-                    <div>
-                      <p className="text-sm text-slate-300">
-                        Привіт,{' '}
-                        <span className="font-semibold text-white">
-                          {profileData?.name || 'користувачу'}
-                        </span>
-                        !
-                      </p>
-                      <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-400">
-                        Твій персональний кабінет
-                      </p>
-                    </div>
-                  </div>
+                  <p className="mb-3 text-sm text-slate-300">
+                    Привіт,{' '}
+                    <span className="font-semibold text-white">
+                      {profileData?.name || 'користувачу'}
+                    </span>
+                    !
+                  </p>
 
                   <h2 className="max-w-2xl text-2xl font-bold leading-tight sm:text-3xl">
                     Твій місячний план тренувань
@@ -302,7 +288,7 @@ function DashboardPage() {
                   <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">
                     Тут відображається короткий план вправ на 4 тижні без зайвого
                     тексту — тільки дні, вправи та кількість підходів і повторень.
-                    Далі сюди ж додамо харчування, прогрес та редагування профілю.
+                    Далі сюди ж додамо харчування, прогрес і поради AI.
                   </p>
 
                   <div className="mt-6 flex flex-wrap gap-3">
@@ -313,13 +299,6 @@ function DashboardPage() {
                       Оновити план
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={handleOpenProfile}
-                      className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
-                    >
-                      Редагувати профіль
-                    </button>
                   </div>
                 </div>
 
@@ -407,90 +386,12 @@ function DashboardPage() {
                   Прогрес
                 </button>
 
-                <button
-                  type="button"
-                  onClick={function () {
-                    setActiveTab('profile');
-                  }}
-                  className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                    activeTab === 'profile'
-                      ? 'bg-gradient-to-r from-cyan-500 to-violet-500 text-white'
-                      : 'border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10'
-                  }`}
-                >
-                  Профіль
-                </button>
               </div>
             </section>
 
             {activeTab === 'training' ? (
-              <section className="mb-8 grid gap-6 lg:grid-cols-4">
-                <div className="rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur lg:col-span-1">
-                  <div className="mb-5 flex items-center gap-4">
-                    <button
-                      type="button"
-                      onClick={handleOpenProfile}
-                      className="flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-lg font-bold text-white"
-                    >
-                      {getInitials(profileData?.name)}
-                    </button>
-
-                    <div>
-                      <h3 className="text-xl font-semibold">Мій профіль</h3>
-                      <button
-                        type="button"
-                        onClick={handleOpenProfile}
-                        className="mt-1 text-xs text-cyan-300 transition hover:text-cyan-200"
-                      >
-                        Редагувати профіль
-                      </button>
-                    </div>
-                  </div>
-
-                  {!profileData ? (
-                    <p className="mt-4 text-sm text-slate-400">
-                      Профіль ще не створено.
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Ім’я</p>
-                        <p className="mt-1 font-medium">{profileData.name}</p>
-                      </div>
-
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Вік</p>
-                        <p className="mt-1 font-medium">{profileData.age}</p>
-                      </div>
-
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Вага</p>
-                        <p className="mt-1 font-medium">{profileData.weight} кг</p>
-                      </div>
-
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Зріст</p>
-                        <p className="mt-1 font-medium">{profileData.height} см</p>
-                      </div>
-
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Стать</p>
-                        <p className="mt-1 font-medium">
-                          {getGenderLabel(profileData.gender)}
-                        </p>
-                      </div>
-
-                      <div className="rounded-xl bg-slate-950/70 p-3">
-                        <p className="text-xs text-slate-400">Ціль</p>
-                        <p className="mt-1 font-medium">
-                          {getGoalLabel(profileData.goal)}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur lg:col-span-3">
+              <section className="mb-8">
+                <div className="rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <h3 className="text-xl font-semibold">Мій план тренувань</h3>
@@ -676,109 +577,6 @@ function DashboardPage() {
               </section>
             ) : null}
 
-            {activeTab === 'profile' ? (
-              <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-                <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-                  <div className="flex items-center gap-5">
-                    <button
-                      type="button"
-                      onClick={handleOpenProfile}
-                      className="flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-3xl font-bold text-white"
-                    >
-                      {getInitials(profileData?.name)}
-                    </button>
-
-                    <div>
-                      <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
-                        Профіль
-                      </p>
-                      <h3 className="mt-2 text-2xl font-bold text-white">
-                        {profileData?.name || 'Користувач'}
-                      </h3>
-                      <p className="mt-2 text-sm text-slate-300">
-                        Тут можна перейти до редагування особистих параметрів,
-                        цілі, активності, рівня та кількості тренувань.
-                      </p>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleOpenProfile}
-                    className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90"
-                  >
-                    Редагувати профіль
-                  </button>
-                </div>
-
-                <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Ім’я</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.name || '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Вік</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.age || '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Стать</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getGenderLabel(profileData.gender) : '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Вага</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.weight ? `${profileData.weight} кг` : '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Зріст</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.height ? `${profileData.height} см` : '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Ціль</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getGoalLabel(profileData.goal) : '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Активність</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getActivityLabel(profileData.activityLevel) : '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">
-                      Тренувань на тиждень
-                    </p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.trainingDaysPerWeek || '—'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">Рівень</p>
-                    <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getExperienceLabel(profileData.experienceLevel) : '—'}
-                    </p>
-                  </div>
-                </div>
-              </section>
-            ) : null}
           </>
         )}
       </div>
