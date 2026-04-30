@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { getMyProfile } from '../../api/profile';
-import { generateTrainingPlan, getMyFullTrainingPlan } from '../../api/training';
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { generateMyAiProgram, getMyAiProgram } from "../../api/ai";
+import { getMyProfile } from "../../api/profile";
 
 type ProfileData = {
   id: number;
@@ -47,28 +47,102 @@ type FullTrainingPlan = {
   weeks: WeekPlan[];
 } | null;
 
-type DashboardTab = 'training' | 'nutrition' | 'progress';
+type DashboardTab = "training" | "nutrition" | "progress";
 
-const avatarStorageKey = 'profileAvatar';
-const planDurationDays = 28;
-const dayMs = 24 * 60 * 60 * 1000;
+type MealIngredient = {
+  name: string;
+  grams: number;
+  calories: number;
+};
+
+type MealItem = {
+  title: string;
+  text: string;
+  ingredients: MealIngredient[];
+};
+
+type MealDayPlan = {
+  dayNumber: number;
+  meals: MealItem[];
+};
+
+type NutritionWeekPlan = {
+  weekNumber: number;
+  days: MealDayPlan[];
+};
+
+type AiProgramResponse = {
+  source?: {
+    ai?: string;
+    savedProgramId?: number;
+    savedAt?: string;
+  };
+  foodLookup?: Array<{
+    id: number;
+    name: string;
+  }>;
+  exerciseLookup?: Array<{
+    id: number;
+    name: string;
+    muscleGroup: string;
+    equipment: string;
+  }>;
+  program?: {
+    trainingPlan?: {
+      title?: string;
+      days?: Array<{
+        dayNumber: number;
+        focus?: string;
+        exercises?: Array<{
+          exerciseId?: number;
+          name?: string;
+          muscleGroup?: string;
+          equipment?: string | null;
+          sets: number;
+          reps: number;
+        }>;
+      }>;
+    };
+    nutritionPlan?: {
+      days?: Array<{
+        dayNumber: number;
+        meals?: Array<{
+          mealType?: string;
+          dishName?: string;
+          foods?: Array<{
+            foodId?: number;
+            name?: string;
+            grams: number;
+            calories?: number;
+          }>;
+        }>;
+      }>;
+    };
+  };
+};
+
+const avatarStorageKey = "profileAvatar";
 
 function DashboardPage() {
   const navigate = useNavigate();
-  const token = localStorage.getItem('token') || '';
+  const token = localStorage.getItem("token") || "";
 
   const [profileData, setProfileData] = useState<ProfileData>(null);
-  const [avatar, setAvatar] = useState<string>('');
+  const [avatar, setAvatar] = useState<string>("");
   const [fullPlan, setFullPlan] = useState<FullTrainingPlan>(null);
   const [activeWeek, setActiveWeek] = useState<number>(1);
   const [loading, setLoading] = useState<boolean>(true);
-  const [message, setMessage] = useState<string>('');
-  const [activeTab, setActiveTab] = useState<DashboardTab>('training');
+  const [message, setMessage] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<DashboardTab>("training");
+  const [activeNutritionWeek, setActiveNutritionWeek] = useState<number>(1);
+  const [nutritionPlan, setNutritionPlan] = useState<NutritionWeekPlan[]>([]);
+  const [isGeneratingProgram, setIsGeneratingProgram] =
+    useState<boolean>(false);
 
   useEffect(() => {
     async function loadDashboardData() {
       if (!token) {
-        navigate('/login');
+        navigate("/login");
         return;
       }
 
@@ -81,18 +155,27 @@ function DashboardPage() {
           setAvatar(storedAvatar);
         }
 
-        const profile = await getMyProfile(token);
-        setProfileData(profile);
+        const results = await Promise.allSettled([
+          getMyProfile(token),
+          getMyAiProgram(token),
+        ]);
 
-        const plan = await getMyFullTrainingPlan(token);
-        setFullPlan(plan);
+        if (results[0].status === "fulfilled") {
+          const profile = results[0].value;
+          setProfileData(profile);
+        } else {
+          console.error(results[0].reason);
+          setMessage("Не вдалося завантажити профіль");
+        }
 
-        if (plan?.weeks?.length) {
-          setActiveWeek(plan.weeks[0].weekNumber);
+        if (results[1].status === "fulfilled" && results[1].value) {
+          applyAiProgram(results[1].value);
+        } else if (results[1].status === "rejected") {
+          console.error(results[1].reason);
         }
       } catch (error) {
         console.error(error);
-        setMessage('Не вдалося завантажити дані кабінету');
+        setMessage("Не вдалося завантажити дані кабінету");
       } finally {
         setLoading(false);
       }
@@ -101,84 +184,120 @@ function DashboardPage() {
     loadDashboardData();
   }, [token, navigate]);
 
-  async function handleGenerateTrainingPlan() {
-    if (!canUpdatePlan) {
-      setMessage(`План активний ще ${planDaysRemaining} дн. Новий план можна створити після завершення 4 тижнів.`);
+  async function handleGenerateProgram() {
+    if (isGeneratingProgram) {
       return;
     }
 
     try {
-      setMessage('Генерація плану...');
+      setIsGeneratingProgram(true);
+      setMessage("Генерація програми...");
+      let hasAiNutrition = false;
 
-      await generateTrainingPlan(token);
-
-      const plan = await getMyFullTrainingPlan(token);
-      setFullPlan(plan);
-
-      if (plan?.weeks?.length) {
-        setActiveWeek(plan.weeks[0].weekNumber);
+      try {
+        const aiProgram = await generateMyAiProgram(token);
+        const applied = applyAiProgram(aiProgram);
+        if (applied.hasNutrition) {
+          hasAiNutrition = true;
+        } else {
+          setMessage("AI не повернув план харчування");
+        }
+      } catch (aiError) {
+        console.error(aiError);
+        setNutritionPlan([]);
+        setMessage(
+          aiError instanceof Error
+            ? `AI сервіс: ${aiError.message}`
+            : "AI сервіс недоступний: план харчування не згенеровано",
+        );
       }
-
-      setActiveTab('training');
-      setMessage('Новий план тренувань успішно створено');
+      setActiveNutritionWeek(1);
+      setActiveTab("training");
+      if (hasAiNutrition) {
+        setMessage("Програму оновлено: тренування і харчування сформовано");
+      }
     } catch (error) {
       console.error(error);
-      setMessage('Помилка генерації плану тренувань');
+      setMessage("Помилка генерації програми");
+    } finally {
+      setIsGeneratingProgram(false);
     }
+  }
+
+  function applyAiProgram(aiProgram: AiProgramResponse) {
+    const aiTraining = buildTrainingPlanFromAiProgram(aiProgram);
+    const aiNutrition = buildNutritionPlanFromAiProgram(aiProgram);
+
+    setFullPlan(aiTraining);
+
+    if (aiTraining?.weeks?.length) {
+      setActiveWeek(aiTraining.weeks[0].weekNumber);
+    }
+
+    if (aiNutrition.length) {
+      setNutritionPlan(aiNutrition);
+    } else {
+      setNutritionPlan([]);
+    }
+
+    return {
+      hasTraining: Boolean(aiTraining?.weeks?.length),
+      hasNutrition: Boolean(aiNutrition.length),
+    };
   }
 
   function handleLogout() {
-    localStorage.removeItem('token');
-    navigate('/login');
+    localStorage.removeItem("token");
+    navigate("/login");
   }
 
   function handleOpenProfile() {
-    navigate('/profile');
+    navigate("/profile");
   }
 
   function getGoalLabel(goal: string) {
-    if (goal === 'gain muscle' || goal === 'gain_muscle') {
-      return 'Набір м’язової маси';
+    if (goal === "gain muscle" || goal === "gain_muscle") {
+      return "Набір м’язової маси";
     }
 
-    if (goal === 'lose weight' || goal === 'lose_weight') {
-      return 'Схуднення';
+    if (goal === "lose weight" || goal === "lose_weight") {
+      return "Схуднення";
     }
 
-    if (goal === 'maintain') {
-      return 'Підтримка форми';
+    if (goal === "maintain") {
+      return "Підтримка форми";
     }
 
     return goal;
   }
 
   function getActivityLabel(activityLevel: string) {
-    if (activityLevel === 'low') {
-      return 'Низький';
+    if (activityLevel === "low") {
+      return "Низький";
     }
 
-    if (activityLevel === 'medium') {
-      return 'Середній';
+    if (activityLevel === "medium") {
+      return "Середній";
     }
 
-    if (activityLevel === 'high') {
-      return 'Високий';
+    if (activityLevel === "high") {
+      return "Високий";
     }
 
     return activityLevel;
   }
 
   function getExperienceLabel(experienceLevel: string) {
-    if (experienceLevel === 'beginner') {
-      return 'Початковий';
+    if (experienceLevel === "beginner") {
+      return "Початковий";
     }
 
-    if (experienceLevel === 'intermediate') {
-      return 'Середній';
+    if (experienceLevel === "intermediate") {
+      return "Середній";
     }
 
-    if (experienceLevel === 'advanced') {
-      return 'Просунутий';
+    if (experienceLevel === "advanced") {
+      return "Просунутий";
     }
 
     return experienceLevel;
@@ -190,32 +309,45 @@ function DashboardPage() {
     }
 
     const base =
-      profileData.gender === 'male'
-        ? 10 * profileData.weight + 6.25 * profileData.height - 5 * profileData.age + 5
-        : 10 * profileData.weight + 6.25 * profileData.height - 5 * profileData.age - 161;
+      profileData.gender === "male"
+        ? 10 * profileData.weight +
+          6.25 * profileData.height -
+          5 * profileData.age +
+          5
+        : 10 * profileData.weight +
+          6.25 * profileData.height -
+          5 * profileData.age -
+          161;
 
     const activityMultiplier =
-      profileData.activityLevel === 'high'
+      profileData.activityLevel === "high"
         ? 1.55
-        : profileData.activityLevel === 'low'
+        : profileData.activityLevel === "low"
           ? 1.25
           : 1.4;
 
     const goalAdjustment =
-      profileData.goal === 'lose_weight' || profileData.goal === 'lose weight'
+      profileData.goal === "lose_weight" || profileData.goal === "lose weight"
         ? -300
-        : profileData.goal === 'gain_muscle' || profileData.goal === 'gain muscle'
+        : profileData.goal === "gain_muscle" ||
+            profileData.goal === "gain muscle"
           ? 250
           : 0;
 
-    return Math.max(1200, Math.round(base * activityMultiplier + goalAdjustment));
+    return Math.max(
+      1200,
+      Math.round(base * activityMultiplier + goalAdjustment),
+    );
   }
 
   function getNutritionTargets() {
     const calories = getDailyCalories();
     const protein = profileData ? Math.round(profileData.weight * 1.8) : 0;
     const fat = profileData ? Math.round(profileData.weight * 0.8) : 0;
-    const carbs = Math.max(0, Math.round((calories - protein * 4 - fat * 9) / 4));
+    const carbs = Math.max(
+      0,
+      Math.round((calories - protein * 4 - fat * 9) / 4),
+    );
 
     return {
       calories,
@@ -225,49 +357,21 @@ function DashboardPage() {
     };
   }
 
-  function getMealPlan() {
-    if (!profileData) {
-      return [];
-    }
-
-    if (profileData.goal === 'gain_muscle' || profileData.goal === 'gain muscle') {
-      return [
-        { title: 'Сніданок', text: 'Вівсянка, яйця, фрукти' },
-        { title: 'Обід', text: 'Курка або риба, рис, овочі' },
-        { title: 'Вечеря', text: 'Творог, салат, цільнозерновий хліб' },
-      ];
-    }
-
-    if (profileData.goal === 'lose_weight' || profileData.goal === 'lose weight') {
-      return [
-        { title: 'Сніданок', text: 'Омлет, овочі, тост' },
-        { title: 'Обід', text: 'Індичка або риба, гречка, салат' },
-        { title: 'Вечеря', text: 'Салат, білкова страва, кефір' },
-      ];
-    }
-
-    return [
-      { title: 'Сніданок', text: 'Каша, йогурт, ягоди' },
-      { title: 'Обід', text: 'М’ясо або бобові, крупа, овочі' },
-      { title: 'Вечеря', text: 'Риба, овочі, легкий гарнір' },
-    ];
+  function getMealWeight(meal: MealItem) {
+    return meal.ingredients.reduce(
+      (total, ingredient) => total + ingredient.grams,
+      0,
+    );
   }
 
-  function getPlanDaysRemaining() {
-    if (!fullPlan?.plan?.createdAt) {
-      return 0;
-    }
+  function getIngredientCalories(ingredient: MealIngredient) {
+    return Math.max(0, Math.round(Number(ingredient.calories) || 0));
+  }
 
-    const createdAt = new Date(fullPlan.plan.createdAt).getTime();
-
-    if (Number.isNaN(createdAt)) {
-      return 0;
-    }
-
-    const planEndsAt = createdAt + planDurationDays * dayMs;
-    const remaining = Math.ceil((planEndsAt - Date.now()) / dayMs);
-
-    return Math.max(0, remaining);
+  function getMealCalories(meal: MealItem) {
+    return meal.ingredients.reduce(function (total, ingredient) {
+      return total + getIngredientCalories(ingredient);
+    }, 0);
   }
 
   function getDayTitle(dayNumber: number) {
@@ -276,13 +380,16 @@ function DashboardPage() {
 
   function getInitials(name: string | undefined) {
     if (!name) {
-      return 'U';
+      return "U";
     }
 
     return name.trim().charAt(0).toUpperCase();
   }
 
-  function renderAvatar(className: string, imageClassName = 'h-full w-full object-cover') {
+  function renderAvatar(
+    className: string,
+    imageClassName = "h-full w-full object-cover",
+  ) {
     return (
       <div className={className}>
         {avatar ? (
@@ -294,28 +401,39 @@ function DashboardPage() {
     );
   }
 
-  const activeWeekData = useMemo(function () {
-    return (
-      fullPlan?.weeks.find(function (week) {
-        return week.weekNumber === activeWeek;
-      }) || null
-    );
-  }, [fullPlan, activeWeek]);
+  const activeWeekData = useMemo(
+    function () {
+      return (
+        fullPlan?.weeks.find(function (week) {
+          return week.weekNumber === activeWeek;
+        }) || null
+      );
+    },
+    [fullPlan, activeWeek],
+  );
+
+  const activeNutritionWeekData = useMemo(
+    function () {
+      return (
+        nutritionPlan.find(function (week) {
+          return week.weekNumber === activeNutritionWeek;
+        }) || null
+      );
+    },
+    [nutritionPlan, activeNutritionWeek],
+  );
 
   const nutritionTargets = getNutritionTargets();
-  const mealPlan = getMealPlan();
-  const planDaysRemaining = getPlanDaysRemaining();
-  const canUpdatePlan = !fullPlan || planDaysRemaining === 0;
-  const updatePlanLabel = !fullPlan
-    ? 'Сформувати програму'
-    : canUpdatePlan
-      ? 'Оновити програму'
-      : `План активний ${planDaysRemaining} дн.`;
-  const updateTrainingLabel = !fullPlan
-    ? 'Сформувати план'
-    : canUpdatePlan
-      ? 'Оновити план'
-      : `Доступно через ${planDaysRemaining} дн.`;
+  const updatePlanLabel = isGeneratingProgram
+    ? "Генерація..."
+    : fullPlan
+      ? "Оновити програму"
+      : "Сформувати програму";
+  const updateTrainingLabel = isGeneratingProgram
+    ? "Генерація..."
+    : fullPlan
+      ? "Оновити план"
+      : "Сформувати план";
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-6 text-white sm:px-6 lg:px-8">
@@ -346,12 +464,12 @@ function DashboardPage() {
               title="Налаштування профілю"
             >
               {renderAvatar(
-                'flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-sm font-bold text-white',
+                "flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-sm font-bold text-white",
               )}
 
               <div className="text-left">
                 <p className="text-sm font-medium text-white">
-                  {profileData?.name || 'Профіль'}
+                  {profileData?.name || "Профіль"}
                 </p>
                 <p className="text-xs text-slate-400">Налаштування</p>
               </div>
@@ -382,9 +500,9 @@ function DashboardPage() {
               <div className="grid gap-6 lg:grid-cols-[1.2fr_0.9fr]">
                 <div>
                   <p className="mb-3 text-sm text-slate-300">
-                    Привіт,{' '}
+                    Привіт,{" "}
                     <span className="font-semibold text-white">
-                      {profileData?.name || 'користувачу'}
+                      {profileData?.name || "користувачу"}
                     </span>
                     !
                   </p>
@@ -401,18 +519,12 @@ function DashboardPage() {
 
                   <div className="mt-6 flex flex-wrap gap-3">
                     <button
-                      onClick={handleGenerateTrainingPlan}
-                      disabled={!canUpdatePlan}
-                      className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={handleGenerateProgram}
+                      disabled={isGeneratingProgram}
+                      className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {updatePlanLabel}
                     </button>
-
-                    {!canUpdatePlan ? (
-                      <span className="flex items-center text-sm text-slate-400">
-                        Поточний план розрахований на 4 тижні.
-                      </span>
-                    ) : null}
                   </div>
                 </div>
 
@@ -422,7 +534,7 @@ function DashboardPage() {
                       Ціль
                     </p>
                     <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getGoalLabel(profileData.goal) : '—'}
+                      {profileData ? getGoalLabel(profileData.goal) : "—"}
                     </p>
                   </div>
 
@@ -431,7 +543,9 @@ function DashboardPage() {
                       Активність
                     </p>
                     <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getActivityLabel(profileData.activityLevel) : '—'}
+                      {profileData
+                        ? getActivityLabel(profileData.activityLevel)
+                        : "—"}
                     </p>
                   </div>
 
@@ -440,7 +554,7 @@ function DashboardPage() {
                       Тренувань на тиждень
                     </p>
                     <p className="mt-2 text-base font-semibold text-white">
-                      {profileData?.trainingDaysPerWeek || '—'}
+                      {profileData?.trainingDaysPerWeek || "—"}
                     </p>
                   </div>
 
@@ -449,7 +563,9 @@ function DashboardPage() {
                       Рівень
                     </p>
                     <p className="mt-2 text-base font-semibold text-white">
-                      {profileData ? getExperienceLabel(profileData.experienceLevel) : '—'}
+                      {profileData
+                        ? getExperienceLabel(profileData.experienceLevel)
+                        : "—"}
                     </p>
                   </div>
                 </div>
@@ -461,12 +577,12 @@ function DashboardPage() {
                 <button
                   type="button"
                   onClick={function () {
-                    setActiveTab('training');
+                    setActiveTab("training");
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                    activeTab === 'training'
-                      ? 'bg-gradient-to-r from-cyan-500 to-violet-500 text-white'
-                      : 'border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10'
+                    activeTab === "training"
+                      ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                      : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
                   }`}
                 >
                   Тренування
@@ -475,12 +591,12 @@ function DashboardPage() {
                 <button
                   type="button"
                   onClick={function () {
-                    setActiveTab('nutrition');
+                    setActiveTab("nutrition");
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                    activeTab === 'nutrition'
-                      ? 'bg-gradient-to-r from-cyan-500 to-violet-500 text-white'
-                      : 'border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10'
+                    activeTab === "nutrition"
+                      ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                      : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
                   }`}
                 >
                   Харчування
@@ -489,37 +605,38 @@ function DashboardPage() {
                 <button
                   type="button"
                   onClick={function () {
-                    setActiveTab('progress');
+                    setActiveTab("progress");
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                    activeTab === 'progress'
-                      ? 'bg-gradient-to-r from-cyan-500 to-violet-500 text-white'
-                      : 'border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10'
+                    activeTab === "progress"
+                      ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                      : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
                   }`}
                 >
                   Прогрес
                 </button>
-
               </div>
             </section>
 
-            {activeTab === 'training' ? (
+            {activeTab === "training" ? (
               <section className="mb-8">
                 <div className="rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                      <h3 className="text-xl font-semibold">Мій план тренувань</h3>
+                      <h3 className="text-xl font-semibold">
+                        Мій план тренувань
+                      </h3>
                       <p className="mt-1 text-sm text-slate-400">
-                        {fullPlan?.plan?.title || 'План ще не згенеровано'}
+                        {fullPlan?.plan?.title || "План ще не згенеровано"}
                       </p>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={handleGenerateTrainingPlan}
-                        disabled={!canUpdatePlan}
-                        className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/5 disabled:text-slate-500"
+                        onClick={handleGenerateProgram}
+                        disabled={isGeneratingProgram}
+                        className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {updateTrainingLabel}
                       </button>
@@ -536,8 +653,8 @@ function DashboardPage() {
                             }}
                             className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
                               isActive
-                                ? 'bg-gradient-to-r from-cyan-500 to-violet-500 text-white'
-                                : 'border border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800'
+                                ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                                : "border border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800"
                             }`}
                           >
                             Тиждень {week.weekNumber}
@@ -560,9 +677,18 @@ function DashboardPage() {
                             className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
                           >
                             <div className="mb-4 flex items-center justify-between">
-                              <h4 className="text-lg font-semibold text-white">
-                                {getDayTitle(day.dayNumber)}
-                              </h4>
+                              <div>
+                                <h4 className="text-lg font-semibold text-white">
+                                  {getDayTitle(day.dayNumber)}
+                                </h4>
+                                <p className="mt-1 text-xs text-slate-400">
+                                  {day.exercises.reduce(
+                                    (total, exercise) => total + exercise.sets,
+                                    0,
+                                  )}{" "}
+                                  підходів загалом
+                                </p>
+                              </div>
                               <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
                                 {day.exercises.length} вправ
                               </span>
@@ -582,6 +708,10 @@ function DashboardPage() {
                                         </p>
                                         <p className="mt-1 text-xs uppercase tracking-wide text-slate-400">
                                           {exercise.muscleGroup}
+                                        </p>
+                                        <p className="mt-2 text-xs text-slate-500">
+                                          {exercise.equipment ||
+                                            "Без обладнання"}
                                         </p>
                                       </div>
 
@@ -607,7 +737,7 @@ function DashboardPage() {
               </section>
             ) : null}
 
-            {activeTab === 'nutrition' ? (
+            {activeTab === "nutrition" ? (
               <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                   <div>
@@ -615,11 +745,12 @@ function DashboardPage() {
                       Харчування
                     </p>
                     <h3 className="mt-3 text-2xl font-bold text-white">
-                      Денний орієнтир харчування
+                      Орієнтир харчування на 4 тижні
                     </h3>
                     <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
                       Рекомендації розраховані за параметрами профілю та
-                      поточною ціллю. Це базовий орієнтир для складання меню.
+                      поточною ціллю. Денна норма лишається орієнтиром для
+                      кожного дня плану.
                     </p>
                   </div>
                 </div>
@@ -630,7 +761,7 @@ function DashboardPage() {
                       Калорії
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.calories || '—'}
+                      {nutritionTargets.calories || "—"}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">ккал / день</p>
                   </div>
@@ -640,9 +771,11 @@ function DashboardPage() {
                       Білки
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.protein || '—'} г
+                      {nutritionTargets.protein || "—"} г
                     </p>
-                    <p className="mt-1 text-xs text-slate-400">відновлення м’язів</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      відновлення м’язів
+                    </p>
                   </div>
 
                   <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
@@ -650,9 +783,11 @@ function DashboardPage() {
                       Жири
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.fat || '—'} г
+                      {nutritionTargets.fat || "—"} г
                     </p>
-                    <p className="mt-1 text-xs text-slate-400">енергія та гормони</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      енергія та гормони
+                    </p>
                   </div>
 
                   <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
@@ -660,42 +795,134 @@ function DashboardPage() {
                       Вуглеводи
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.carbs || '—'} г
+                      {nutritionTargets.carbs || "—"} г
                     </p>
-                    <p className="mt-1 text-xs text-slate-400">паливо для тренувань</p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      паливо для тренувань
+                    </p>
                   </div>
                 </div>
 
                 <div className="mt-6">
-                  <h4 className="text-lg font-semibold text-white">Приклад дня</h4>
-                  <div className="mt-4 grid gap-4 md:grid-cols-3">
-                    {mealPlan.map(function (meal) {
-                      return (
-                        <div
-                          key={meal.title}
-                          className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
-                        >
-                          <p className="text-xs uppercase tracking-wide text-slate-400">
-                            {meal.title}
-                          </p>
-                          <p className="mt-2 text-sm leading-6 text-slate-200">
-                            {meal.text}
-                          </p>
-                        </div>
-                      );
-                    })}
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <h4 className="text-lg font-semibold text-white">
+                      План харчування на 4 тижні
+                    </h4>
 
-                    {!mealPlan.length ? (
-                      <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4 text-sm text-slate-400 md:col-span-3">
-                        Створи профіль, щоб отримати орієнтир харчування.
+                    {nutritionPlan.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        {nutritionPlan.map(function (week) {
+                          const isActive =
+                            week.weekNumber === activeNutritionWeek;
+
+                          return (
+                            <button
+                              key={week.weekNumber}
+                              type="button"
+                              onClick={function () {
+                                setActiveNutritionWeek(week.weekNumber);
+                              }}
+                              className={
+                                isActive
+                                  ? "rounded-xl border border-cyan-400 bg-cyan-400/15 px-3 py-2 text-sm font-semibold text-cyan-100"
+                                  : "rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-cyan-400/60 hover:text-white"
+                              }
+                            >
+                              Тиждень {week.weekNumber}
+                            </button>
+                          );
+                        })}
                       </div>
                     ) : null}
                   </div>
+
+                  {!activeNutritionWeekData ? (
+                    <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4 text-sm text-slate-400">
+                      Створи профіль, щоб отримати орієнтир харчування.
+                    </div>
+                  ) : (
+                    <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                      {activeNutritionWeekData.days.map(function (day) {
+                        return (
+                          <div
+                            key={day.dayNumber}
+                            className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
+                          >
+                            <p className="text-xs uppercase tracking-wide text-cyan-300">
+                              День {day.dayNumber}
+                            </p>
+
+                            <div className="mt-4 space-y-4">
+                              {day.meals.map(function (meal) {
+                                return (
+                                  <div
+                                    key={`${day.dayNumber}-${meal.title}`}
+                                    className="rounded-xl bg-slate-900/70 p-3"
+                                  >
+                                    <div className="flex flex-wrap items-start justify-between gap-3">
+                                      <div>
+                                        <p className="text-xs uppercase tracking-wide text-slate-400">
+                                          {meal.title}
+                                        </p>
+                                        <p className="mt-1 text-sm font-semibold leading-6 text-slate-100">
+                                          {meal.text}
+                                        </p>
+                                      </div>
+
+                                      <div className="flex gap-2">
+                                        <span className="rounded-lg bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-200">
+                                          {getMealWeight(meal)} г
+                                        </span>
+                                        <span className="rounded-lg bg-violet-500/10 px-2.5 py-1 text-xs text-violet-200">
+                                          {getMealCalories(meal)} ккал
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                      {meal.ingredients.map(
+                                        function (ingredient) {
+                                          return (
+                                            <div
+                                              key={`${day.dayNumber}-${meal.title}-${ingredient.name}`}
+                                              className="flex items-center justify-between gap-3 rounded-lg bg-slate-950/60 px-3 py-2"
+                                            >
+                                              <span className="text-sm text-slate-300">
+                                                {ingredient.name}
+                                              </span>
+                                              <span className="shrink-0 text-right text-sm font-semibold text-white">
+                                                {ingredient.grams} г
+                                                <span className="ml-2 text-xs font-normal text-slate-400">
+                                                  {getIngredientCalories(
+                                                    ingredient,
+                                                  )}{" "}
+                                                  ккал
+                                                </span>
+                                              </span>
+                                            </div>
+                                          );
+                                        },
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <p className="mt-4 text-xs leading-5 text-slate-500">
+                    Вага вказана для сирого або готового продукту згідно з
+                    назвою: “варений рис”, “варена гречка”, “овочі”.
+                  </p>
                 </div>
               </section>
             ) : null}
 
-            {activeTab === 'progress' ? (
+            {activeTab === "progress" ? (
               <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
                 <div>
                   <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
@@ -705,8 +932,8 @@ function DashboardPage() {
                     Поточний стан і активність
                   </h3>
                   <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
-                    Тут показані основні показники, за якими можна оцінювати
-                    рух до цілі та регулярність тренувань.
+                    Тут показані основні показники, за якими можна оцінювати рух
+                    до цілі та регулярність тренувань.
                   </p>
 
                   <div className="mt-6 grid gap-4 md:grid-cols-3">
@@ -715,7 +942,7 @@ function DashboardPage() {
                         Поточна вага
                       </p>
                       <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData?.weight ? `${profileData.weight} кг` : '—'}
+                        {profileData?.weight ? `${profileData.weight} кг` : "—"}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
                         оновлюється через профіль
@@ -727,7 +954,7 @@ function DashboardPage() {
                         Ціль
                       </p>
                       <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData ? getGoalLabel(profileData.goal) : '—'}
+                        {profileData ? getGoalLabel(profileData.goal) : "—"}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
                         основний напрям програми
@@ -739,7 +966,7 @@ function DashboardPage() {
                         Тренувань
                       </p>
                       <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData?.trainingDaysPerWeek || '—'} / тиждень
+                        {profileData?.trainingDaysPerWeek || "—"} / тиждень
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
                         планова регулярність
@@ -754,7 +981,8 @@ function DashboardPage() {
                           Тижнева структура
                         </h4>
                         <p className="mt-1 text-sm text-slate-400">
-                          План розрахований на 4 тижні з поступовою регулярністю.
+                          План розрахований на 4 тижні з поступовою
+                          регулярністю.
                         </p>
                       </div>
                       <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
@@ -774,7 +1002,7 @@ function DashboardPage() {
                           <div
                             key={weekNumber}
                             className={`h-3 rounded-full ${
-                              isReady ? 'bg-cyan-400' : 'bg-slate-800'
+                              isReady ? "bg-cyan-400" : "bg-slate-800"
                             }`}
                             title={`Тиждень ${weekNumber}`}
                           />
@@ -785,12 +1013,269 @@ function DashboardPage() {
                 </div>
               </section>
             ) : null}
-
           </>
         )}
       </div>
     </div>
   );
+}
+
+function buildTrainingPlanFromAiProgram(
+  data: AiProgramResponse,
+): FullTrainingPlan {
+  const days = data.program?.trainingPlan?.days ?? [];
+  const title = data.program?.trainingPlan?.title ?? "AI план тренувань";
+  const exerciseLookup = new Map(
+    (data.exerciseLookup ?? []).map((item) => [item.id, item]),
+  );
+
+  if (!days.length) {
+    return null;
+  }
+
+  const weekDays = [...days]
+    .sort((a, b) => a.dayNumber - b.dayNumber)
+    .map((aiDay, dayIndex) => {
+      const dayNumber = aiDay.dayNumber || dayIndex + 1;
+      const exercises = (aiDay.exercises ?? []).map(
+        (exercise, exerciseIndex) => {
+          const found =
+            typeof exercise.exerciseId === "number"
+              ? exerciseLookup.get(exercise.exerciseId)
+              : undefined;
+          const id = exercise.exerciseId ?? dayNumber * 100 + exerciseIndex + 1;
+          return {
+            id,
+            name: exercise.name ?? found?.name ?? `Вправа #${id}`,
+            muscleGroup:
+              exercise.muscleGroup ??
+              found?.muscleGroup ??
+              aiDay?.focus ??
+              "Загальна підготовка",
+            description: null,
+            equipment: exercise.equipment ?? found?.equipment ?? null,
+            sets: Math.max(1, Math.round(exercise.sets)),
+            reps: Math.max(1, Math.round(exercise.reps)),
+          };
+        },
+      );
+
+      return {
+        dayNumber,
+        exercises,
+      };
+    });
+
+  const weeks = Array.from({ length: 4 }, function (_, weekIndex) {
+    return {
+      weekNumber: weekIndex + 1,
+      days: weekDays.map((day) => ({
+        dayNumber: day.dayNumber,
+        exercises: day.exercises.map((exercise) => ({ ...exercise })),
+      })),
+    };
+  });
+
+  return {
+    plan: {
+      id: 0,
+      userId: 0,
+      title,
+      createdAt: new Date().toISOString(),
+    },
+    weeks,
+  };
+}
+
+function buildNutritionPlanFromAiProgram(
+  data: AiProgramResponse,
+): NutritionWeekPlan[] {
+  const days = data.program?.nutritionPlan?.days ?? [];
+  const foodLookup = new Map(
+    (data.foodLookup ?? []).map((item) => [item.id, item.name]),
+  );
+
+  if (!days.length) {
+    return [];
+  }
+
+  const usedDishNames = new Set<string>();
+  const allDays = Array.from({ length: 28 }, function (_, dayIndex) {
+    const dayNumber = dayIndex + 1;
+    const aiDay = days.find((item) => item.dayNumber === dayNumber);
+
+    const seenMealTypes = new Set<string>();
+    const sortedMeals = [...(aiDay?.meals ?? [])].sort((a, b) => {
+      return getMealTypeOrder(a.mealType) - getMealTypeOrder(b.mealType);
+    });
+
+    const meals = sortedMeals
+      .filter((meal) => {
+        const key = normalizeMealType(meal.mealType);
+        if (seenMealTypes.has(key)) {
+          return false;
+        }
+        seenMealTypes.add(key);
+        return true;
+      })
+      .map((meal) => {
+        const mealType = normalizeMealType(meal.mealType);
+        const ingredients = (meal.foods ?? []).map((food) => ({
+          name:
+            food.name ??
+            (food.foodId ? foodLookup.get(food.foodId) : undefined) ??
+            "Інгредієнт",
+          grams: Math.max(1, Math.round(food.grams)),
+          calories: Math.max(0, Math.round(Number(food.calories) || 0)),
+        }));
+
+        const dishName = meal.dishName?.trim() ?? "";
+        const fallbackDishName = pickPleasantDishName(mealType, dayNumber);
+        const rawDishName =
+          isValidHumanDishName(dishName) && !looksLikeIngredientList(dishName)
+            ? dishName
+            : fallbackDishName;
+        const finalDishName = makeUniqueDishName(
+          rawDishName,
+          mealType,
+          dayNumber,
+          usedDishNames,
+        );
+
+        return {
+          title: finalDishName,
+          text: ingredients.length
+            ? ingredients.map((item) => item.name).join(", ")
+            : "Склад не вказано",
+          ingredients,
+        };
+      });
+
+    return {
+      dayNumber,
+      meals,
+    };
+  });
+
+  return Array.from({ length: 4 }, (_, weekIndex) => {
+    const start = weekIndex * 7;
+    const weekDays = allDays.slice(start, start + 7);
+
+    return {
+      weekNumber: weekIndex + 1,
+      days: weekDays.map((day, dayIndex) => ({
+        dayNumber: dayIndex + 1,
+        meals: day.meals.map((meal) => ({
+          ...meal,
+          ingredients: meal.ingredients.map((ingredient) => ({
+            ...ingredient,
+          })),
+        })),
+      })),
+    };
+  });
+}
+
+function isValidHumanDishName(value: string) {
+  const normalized = value.trim();
+  return normalized.length >= 4 && normalized.length <= 64;
+}
+
+function looksLikeIngredientList(value: string) {
+  const normalized = value.toLowerCase();
+  const forbiddenTokens = [
+    "сніданок",
+    "обід",
+    "вечеря",
+    "перекус",
+    ",",
+    " + ",
+    ";",
+  ];
+  return forbiddenTokens.some((token) => normalized.includes(token));
+}
+
+function normalizeMealType(value: string | undefined) {
+  const normalized = value?.toLowerCase().trim() ?? "";
+
+  if (["breakfast", "lunch", "dinner", "snack"].includes(normalized)) {
+    return normalized;
+  }
+
+  return "snack";
+}
+
+function getMealTypeOrder(value: string | undefined) {
+  const orderedMealTypes = ["breakfast", "lunch", "dinner", "snack"];
+  const index = orderedMealTypes.indexOf(normalizeMealType(value));
+
+  return index === -1 ? orderedMealTypes.length : index;
+}
+
+function pickPleasantDishName(mealType: string, dayNumber: number) {
+  const byType: Record<string, string[]> = {
+    breakfast: [
+      "Йогуртовий боул з ягодами",
+      "Омлет з сиром і зеленню",
+      "Вівсянка з фруктами та горіхами",
+      "Сирники з ягідним топінгом",
+    ],
+    lunch: [
+      "Курка теріякі з рисом",
+      "Паста з тунцем і томатами",
+      "Індичка з гречкою та овочами",
+      "Теплий боул з куркою та броколі",
+    ],
+    dinner: [
+      "Лосось з овочами на грилі",
+      "Тефтелі з індички з гарніром",
+      "Риба з картоплею та салатом",
+      "Овочеве рагу з квасолею",
+    ],
+    snack: [
+      "Творожний десерт з ягодами",
+      "Йогурт з горіхами",
+      "Фруктовий смузі",
+      "Легкий протеїновий перекус",
+    ],
+  };
+
+  const items = byType[mealType?.toLowerCase()] ?? ["Домашня страва"];
+  return items[dayNumber % items.length];
+}
+
+function makeUniqueDishName(
+  baseName: string,
+  mealType: string,
+  dayNumber: number,
+  usedDishNames: Set<string>,
+) {
+  const normalized = baseName.trim();
+
+  if (!usedDishNames.has(normalized)) {
+    usedDishNames.add(normalized);
+    return normalized;
+  }
+
+  const variants = [
+    `${normalized} з травами`,
+    `${normalized} у легкому соусі`,
+    `${normalized} по-домашньому`,
+    `${normalized} зі спеціями`,
+    `${normalized} по-середземноморськи`,
+    pickPleasantDishName(mealType, dayNumber + 11),
+  ];
+
+  for (const candidate of variants) {
+    if (!usedDishNames.has(candidate)) {
+      usedDishNames.add(candidate);
+      return candidate;
+    }
+  }
+
+  const numbered = `${normalized} #${dayNumber}`;
+  usedDishNames.add(numbered);
+  return numbered;
 }
 
 export default DashboardPage;

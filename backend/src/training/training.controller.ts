@@ -1,15 +1,19 @@
 import { Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { AiService } from '../ai/ai.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { TrainingService } from './training.service';
 
 @Controller('training')
 export class TrainingController {
-  constructor(private readonly trainingService: TrainingService) {}
+  constructor(
+    private readonly trainingService: TrainingService,
+    private readonly aiService: AiService,
+  ) {}
 
   @UseGuards(JwtAuthGuard)
   @Post('generate')
   generate(@Req() req: { user: { userId: number; email: string } }) {
-    return this.trainingService.generateTrainingPlan(req.user.userId);
+    return this.aiService.generateProgramForUser(req.user.userId);
   }
 
   @UseGuards(JwtAuthGuard)

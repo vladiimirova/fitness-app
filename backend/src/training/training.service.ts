@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { db } from '../db';
 import { exercisesTable } from '../db/schema/exercises';
 import { trainingPlanExercisesTable } from '../db/schema/training-plan-exercises';
@@ -46,6 +46,7 @@ export class TrainingService {
     const createdPlan = insertedPlans[0];
 
     const weeklyTemplate = this.buildDayTemplates(profile.goal, trainingDaysPerWeek);
+    const planExercisesToInsert: Array<typeof trainingPlanExercisesTable.$inferInsert> = [];
 
     for (let weekNumber = 1; weekNumber <= 4; weekNumber += 1) {
       for (const day of weeklyTemplate) {
@@ -57,7 +58,7 @@ export class TrainingService {
         );
 
         for (const exercise of pickedExercises) {
-          await db.insert(trainingPlanExercisesTable).values({
+          planExercisesToInsert.push({
             trainingPlanId: createdPlan.id,
             exerciseId: exercise.exerciseId,
             weekNumber,
@@ -67,6 +68,10 @@ export class TrainingService {
           });
         }
       }
+    }
+
+    if (planExercisesToInsert.length) {
+      await db.insert(trainingPlanExercisesTable).values(planExercisesToInsert);
     }
 
     return createdPlan;
@@ -105,6 +110,8 @@ export class TrainingService {
     )
     .where(eq(trainingPlanExercisesTable.trainingPlanId, plan.id));
 
+  await this.ensureExerciseTranslations(rows.map((row) => row.exercise).filter(Boolean));
+
   const weeksMap: Record<
     number,
     Record<
@@ -133,18 +140,12 @@ export class TrainingService {
       weeksMap[weekNumber][dayNumber] = [];
     }
 
-    const translatedName = await this.translateService.translateToUkrainian(
-      row.exercise?.name ?? '',
-    );
-
-    const translatedMuscleGroup = await this.translateService.translateToUkrainian(
-      row.exercise?.muscleGroup ?? '',
-    );
-
     weeksMap[weekNumber][dayNumber].push({
       id: row.exercise?.id ?? 0,
-      name: translatedName,
-      muscleGroup: translatedMuscleGroup,
+      name: row.exercise?.nameUk ?? row.exercise?.name ?? '',
+      muscleGroup: this.translateService.translateToUkrainian(
+        row.exercise?.muscleGroupUk ?? row.exercise?.muscleGroup ?? '',
+      ),
       description: null,
       equipment: row.exercise?.equipment ?? null,
       sets: row.trainingPlanExercise.sets,
@@ -183,6 +184,89 @@ export class TrainingService {
     weeks,
   };
 }
+
+  private async ensureExerciseTranslations(exercises: Array<ExerciseRow | null>) {
+    const uniqueExercises = Array.from(
+      new Map(
+        exercises
+          .filter((exercise): exercise is ExerciseRow => Boolean(exercise))
+          .map((exercise) => [exercise.id, exercise]),
+      ).values(),
+    );
+
+    const exercisesWithoutNameTranslation = uniqueExercises.filter((exercise) => {
+      return !exercise.nameUk || this.hasLatinLetters(exercise.nameUk);
+    });
+
+    if (exercisesWithoutNameTranslation.length) {
+      const nameTranslations =
+        await this.translateService.translateExerciseNamesToUkrainian(
+          exercisesWithoutNameTranslation.map((exercise) => exercise.name),
+        );
+
+      for (const exercise of exercisesWithoutNameTranslation) {
+        const translatedName =
+          nameTranslations.get(exercise.name) ??
+          this.translateService.translateToUkrainian(exercise.name);
+
+        if (!this.hasLatinLetters(translatedName)) {
+          await db
+            .update(exercisesTable)
+            .set({
+              nameUk: translatedName,
+            })
+            .where(eq(exercisesTable.id, exercise.id));
+        }
+
+        exercise.nameUk = translatedName;
+      }
+    }
+
+    const muscleGroupsToTranslate = Array.from(
+      new Set(
+        uniqueExercises
+          .filter((exercise) => !exercise.muscleGroupUk)
+          .map((exercise) => exercise.muscleGroup),
+      ),
+    );
+
+    if (!muscleGroupsToTranslate.length) {
+      return;
+    }
+
+    const muscleGroupTranslations = new Map(
+      muscleGroupsToTranslate.map((muscleGroup) => [
+        muscleGroup,
+        this.translateService.translateToUkrainian(muscleGroup),
+      ]),
+    );
+
+    for (const [muscleGroup, muscleGroupUk] of muscleGroupTranslations.entries()) {
+      await db
+        .update(exercisesTable)
+        .set({
+          muscleGroupUk,
+        })
+        .where(
+          and(
+            eq(exercisesTable.muscleGroup, muscleGroup),
+            or(isNull(exercisesTable.muscleGroupUk), eq(exercisesTable.muscleGroupUk, '')),
+          ),
+        );
+    }
+
+    for (const exercise of uniqueExercises) {
+      if (!exercise.muscleGroupUk) {
+        exercise.muscleGroupUk =
+          muscleGroupTranslations.get(exercise.muscleGroup) ??
+          this.translateService.translateToUkrainian(exercise.muscleGroup);
+      }
+    }
+  }
+
+  private hasLatinLetters(text: string | null) {
+    return Boolean(text && /[a-z]/i.test(text));
+  }
 
   private getSplit(goal: string, trainingDaysPerWeek: number) {
     if (goal === 'gain muscle' || goal === 'gain_muscle') {
