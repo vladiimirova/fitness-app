@@ -182,10 +182,18 @@ function saveChatSessionsToStorage(sessions: ChatSession[]) {
   localStorage.setItem(chatSessionsStorageKey, JSON.stringify(sessions));
 }
 
+function getPersistedChatSessions(sessions: ChatSession[]) {
+  return sessions.filter((session) => session.messages.length > 0);
+}
+
 function upsertChatSession(
   sessions: ChatSession[],
   nextSession: ChatSession,
 ) {
+  if (!nextSession.messages.length) {
+    return sessions.filter((session) => session.id !== nextSession.id);
+  }
+
   const withoutCurrent = sessions.filter(
     (session) => session.id !== nextSession.id,
   );
@@ -270,9 +278,7 @@ function DashboardPage() {
   const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
   const [progressPeriod, setProgressPeriod] = useState<ProgressPeriod>("week");
   const [isSavingProgress, setIsSavingProgress] = useState<boolean>(false);
-  const [chatSessions, setChatSessions] = useState<ChatSession[]>([
-    createChatSession(),
-  ]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
   const [chatInput, setChatInput] = useState<string>("");
   const [isSendingChatMessage, setIsSendingChatMessage] =
@@ -292,10 +298,7 @@ function DashboardPage() {
   });
 
   const activeChatSession = useMemo(() => {
-    return (
-      chatSessions.find((session) => session.id === activeChatId) ??
-      chatSessions[0]
-    );
+    return chatSessions.find((session) => session.id === activeChatId) ?? null;
   }, [chatSessions, activeChatId]);
   const chatMessages = activeChatSession?.messages ?? [];
 
@@ -332,7 +335,7 @@ function DashboardPage() {
 
           if (parsedSessions.length) {
             setChatSessions(parsedSessions);
-            setActiveChatId(parsedSessions[0].id);
+            setActiveChatId("");
           }
         } else if (storedChat) {
           const migratedSession = createChatSession(
@@ -340,15 +343,9 @@ function DashboardPage() {
           );
 
           setChatSessions([migratedSession]);
-          setActiveChatId(migratedSession.id);
+          setActiveChatId("");
           saveChatSessionsToStorage([migratedSession]);
           localStorage.removeItem(chatStorageKey);
-        } else {
-          const emptySession = createChatSession();
-
-          setChatSessions([emptySession]);
-          setActiveChatId(emptySession.id);
-          saveChatSessionsToStorage([emptySession]);
         }
 
         const results = await Promise.allSettled([
@@ -588,7 +585,7 @@ function DashboardPage() {
 
     setChatSessions(sessionsWithUserMessage);
     setActiveChatId(nextSession.id);
-    saveChatSessionsToStorage(sessionsWithUserMessage);
+    saveChatSessionsToStorage(getPersistedChatSessions(sessionsWithUserMessage));
     setChatInput("");
     setMessage("");
 
@@ -620,7 +617,7 @@ function DashboardPage() {
       );
 
       setChatSessions(finalSessions);
-      saveChatSessionsToStorage(finalSessions);
+      saveChatSessionsToStorage(getPersistedChatSessions(finalSessions));
       setMessage("");
     } catch (error) {
       console.error(error);
@@ -635,7 +632,13 @@ function DashboardPage() {
   }
 
   function handleClearChat() {
-    const currentSession = activeChatSession ?? createChatSession();
+    if (!activeChatSession) {
+      setChatInput("");
+      setMessage("");
+      return;
+    }
+
+    const currentSession = activeChatSession;
     const clearedSession: ChatSession = {
       ...currentSession,
       title: "Новий чат",
@@ -645,21 +648,53 @@ function DashboardPage() {
     const nextSessions = upsertChatSession(chatSessions, clearedSession);
 
     setChatSessions(nextSessions);
-    setActiveChatId(clearedSession.id);
+    setActiveChatId("");
     setChatInput("");
-    saveChatSessionsToStorage(nextSessions);
+    saveChatSessionsToStorage(getPersistedChatSessions(nextSessions));
     setMessage("AI чат очищено");
   }
 
   function handleCreateChatSession() {
-    const nextSession = createChatSession();
-    const nextSessions = [nextSession, ...chatSessions];
+    setActiveChatId("");
+    setChatInput("");
+    setMessage("");
+  }
+
+  function handleRenameChatSession(sessionId: string) {
+    const session = chatSessions.find((item) => item.id === sessionId);
+    const nextTitle = window.prompt(
+      "Нова назва чату",
+      session?.title ?? "Новий чат",
+    );
+    const normalizedTitle = nextTitle?.trim();
+
+    if (!normalizedTitle) {
+      return;
+    }
+
+    const nextSessions = chatSessions.map((item) =>
+      item.id === sessionId
+        ? {
+            ...item,
+            title: normalizedTitle,
+            updatedAt: new Date().toISOString(),
+          }
+        : item,
+    );
 
     setChatSessions(nextSessions);
-    setActiveChatId(nextSession.id);
-    setChatInput("");
-    saveChatSessionsToStorage(nextSessions);
-    setMessage("");
+    saveChatSessionsToStorage(getPersistedChatSessions(nextSessions));
+  }
+
+  function handleDeleteChatSession(sessionId: string) {
+    const nextSessions = chatSessions.filter((item) => item.id !== sessionId);
+
+    setChatSessions(nextSessions);
+    if (activeChatId === sessionId) {
+      setActiveChatId("");
+      setChatInput("");
+    }
+    saveChatSessionsToStorage(getPersistedChatSessions(nextSessions));
   }
 
   function getProgressReport(entries: ProgressEntry[]) {
@@ -1711,31 +1746,60 @@ function DashboardPage() {
                     </button>
 
                     <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">
-                      {chatSessions.map((session) => {
-                        const isActive = session.id === activeChatSession?.id;
+                      {chatSessions.length ? (
+                        chatSessions.map((session) => {
+                          const isActive = session.id === activeChatId;
 
-                        return (
-                          <button
-                            key={session.id}
-                            type="button"
-                            onClick={() => setActiveChatId(session.id)}
-                            className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                          return (
+                            <div
+                              key={session.id}
+                              className={`rounded-xl border p-2 transition ${
                               isActive
                                 ? "border-cyan-400/50 bg-cyan-400/10"
                                 : "border-white/10 bg-white/5 hover:bg-white/10"
-                            }`}
-                          >
-                            <span className="block truncate text-sm font-semibold text-white">
-                              {session.title}
-                            </span>
-                            <span className="mt-1 block text-xs text-slate-400">
-                              {session.messages.length
-                                ? `${session.messages.length} повідомл.`
-                                : "Порожній чат"}
-                            </span>
-                          </button>
-                        );
-                      })}
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setActiveChatId(session.id)}
+                                className="w-full text-left"
+                              >
+                                <span className="block truncate text-sm font-semibold text-white">
+                                  {session.title}
+                                </span>
+                                <span className="mt-1 block text-xs text-slate-400">
+                                  {`${session.messages.length} повідомл.`}
+                                </span>
+                              </button>
+
+                              <div className="mt-3 flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRenameChatSession(session.id)
+                                  }
+                                  className="flex-1 rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+                                >
+                                  Назва
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleDeleteChatSession(session.id)
+                                  }
+                                  className="flex-1 rounded-lg border border-rose-400/20 bg-rose-400/10 px-2 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-400/20"
+                                >
+                                  Видалити
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })
+                      ) : (
+                        <div className="rounded-xl border border-dashed border-white/10 px-3 py-4 text-sm text-slate-400">
+                          Історія з'явиться після першого повідомлення.
+                        </div>
+                      )}
                     </div>
                   </aside>
 
