@@ -531,6 +531,13 @@ function DashboardPage() {
     }
   }
 
+  function handleClearChat() {
+    setChatMessages([]);
+    setChatInput("");
+    localStorage.removeItem(chatStorageKey);
+    setMessage("AI чат очищено");
+  }
+
   function getProgressReport(entries: ProgressEntry[]) {
     if (!entries.length) {
       return "Додай перший замір, щоб отримати звіт по прогресу.";
@@ -1549,13 +1556,24 @@ function DashboardPage() {
 
             {activeTab === "chat" ? (
               <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-                <div className="flex flex-col gap-2">
-                  <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
-                    AI чат
-                  </p>
-                  <h3 className="text-2xl font-bold text-white">
-                    Питання по програмі
-                  </h3>
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex flex-col gap-2">
+                    <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
+                      AI чат
+                    </p>
+                    <h3 className="text-2xl font-bold text-white">
+                      Питання по програмі
+                    </h3>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleClearChat}
+                    disabled={!chatMessages.length && !chatInput.trim()}
+                    className="w-fit rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Очистити чат
+                  </button>
                 </div>
 
                 <div
