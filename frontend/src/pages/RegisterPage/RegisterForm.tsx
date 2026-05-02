@@ -1,5 +1,5 @@
-import type { ChangeEvent } from 'react';
-import type { LoginFormData } from '../../types';
+import type { ChangeEvent } from "react";
+import type { LoginFormData } from "../../types";
 
 type RegisterFormProps = {
   form: LoginFormData;
@@ -9,14 +9,22 @@ type RegisterFormProps = {
 
 function RegisterForm({ form, onChange, onSubmit }: RegisterFormProps) {
   return (
-    <div className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-lg shadow-black/20 sm:p-8">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+      className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-lg shadow-black/20 sm:p-8"
+    >
       <h1 className="text-center text-2xl font-semibold sm:text-3xl">
         Реєстрація
       </h1>
 
       <input
+        id="register-email"
         type="email"
         name="email"
+        autoComplete="email"
         placeholder="Введіть email"
         value={form.email}
         onChange={onChange}
@@ -24,8 +32,10 @@ function RegisterForm({ form, onChange, onSubmit }: RegisterFormProps) {
       />
 
       <input
+        id="register-password"
         type="password"
         name="password"
+        autoComplete="new-password"
         placeholder="Введіть пароль"
         value={form.password}
         onChange={onChange}
@@ -33,12 +43,12 @@ function RegisterForm({ form, onChange, onSubmit }: RegisterFormProps) {
       />
 
       <button
-        onClick={onSubmit}
+        type="submit"
         className="mt-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-indigo-500 sm:text-base"
       >
         Зареєструватися
       </button>
-    </div>
+    </form>
   );
 }
 

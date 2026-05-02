@@ -1,38 +1,42 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { createProfile, getMyProfile, updateMyProfile } from '../../api/profile';
-import type { ProfileFormData, ProfilePayload, UserProfile } from '../../types';
+import { useEffect, useMemo, useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import {
+  createProfile,
+  getMyProfile,
+  updateMyProfile,
+} from "../../api/profile";
+import type { ProfileFormData, ProfilePayload, UserProfile } from "../../types";
 
 const defaultForm: ProfileFormData = {
-  name: '',
-  age: '',
-  weight: '',
-  height: '',
-  gender: 'female',
-  goal: 'lose_weight',
-  activityLevel: 'medium',
-  trainingDaysPerWeek: '3',
-  experienceLevel: 'beginner',
+  name: "",
+  age: "",
+  weight: "",
+  height: "",
+  gender: "female",
+  goal: "lose_weight",
+  activityLevel: "medium",
+  trainingDaysPerWeek: "3",
+  experienceLevel: "beginner",
 };
 
-const avatarStorageKey = 'profileAvatar';
+const avatarStorageKey = "profileAvatar";
 
 function ProfilePage() {
   const navigate = useNavigate();
-  const token = localStorage.getItem('token') || '';
+  const token = localStorage.getItem("token") || "";
 
   const [form, setForm] = useState<ProfileFormData>(defaultForm);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [avatar, setAvatar] = useState<string>('');
+  const [avatar, setAvatar] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
     async function loadProfile() {
       if (!token) {
-        navigate('/login');
+        navigate("/login");
         return;
       }
 
@@ -41,14 +45,17 @@ function ProfilePage() {
 
         const storedAvatar = localStorage.getItem(avatarStorageKey);
 
-        if (storedAvatar) {
-          setAvatar(storedAvatar);
-        }
-
         const data = await getMyProfile(token);
         setProfile(data);
 
         if (data) {
+          const nextAvatar = data.avatarUrl || storedAvatar || "";
+
+          setAvatar(nextAvatar);
+          if (nextAvatar) {
+            localStorage.setItem(avatarStorageKey, nextAvatar);
+          }
+
           setForm({
             name: data.name,
             age: String(data.age),
@@ -60,10 +67,12 @@ function ProfilePage() {
             trainingDaysPerWeek: String(data.trainingDaysPerWeek),
             experienceLevel: data.experienceLevel,
           });
+        } else if (storedAvatar) {
+          setAvatar(storedAvatar);
         }
       } catch (error) {
         console.error(error);
-        setMessage('Не вдалося завантажити профіль');
+        setMessage("Не вдалося завантажити профіль");
       } finally {
         setLoading(false);
       }
@@ -73,10 +82,12 @@ function ProfilePage() {
   }, [navigate, token]);
 
   const initials = useMemo(() => {
-    return form.name.trim().charAt(0).toUpperCase() || 'U';
+    return form.name.trim().charAt(0).toUpperCase() || "U";
   }, [form.name]);
 
-  function handleChange(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+  function handleChange(
+    event: ChangeEvent<HTMLInputElement | HTMLSelectElement>,
+  ) {
     const { name, value } = event.target;
 
     setForm((prev) => ({
@@ -94,8 +105,8 @@ function ProfilePage() {
 
     const reader = new FileReader();
 
-    reader.onload = () => {
-      const result = String(reader.result || '');
+    reader.onload = async () => {
+      const result = await resizeAvatar(String(reader.result || ""));
       setAvatar(result);
       localStorage.setItem(avatarStorageKey, result);
     };
@@ -103,7 +114,7 @@ function ProfilePage() {
     reader.readAsDataURL(file);
   }
 
-  function buildPayload(): ProfilePayload {
+  function buildPayload(nextAvatar: string): ProfilePayload {
     return {
       name: form.name.trim(),
       age: Number(form.age),
@@ -114,6 +125,7 @@ function ProfilePage() {
       activityLevel: form.activityLevel,
       trainingDaysPerWeek: Number(form.trainingDaysPerWeek),
       experienceLevel: form.experienceLevel,
+      avatarUrl: nextAvatar || null,
     };
   }
 
@@ -122,18 +134,33 @@ function ProfilePage() {
 
     try {
       setSaving(true);
-      setMessage('');
+      setMessage("");
 
-      const payload = buildPayload();
+      const normalizedAvatar = avatar ? await resizeAvatar(avatar) : "";
+      setAvatar(normalizedAvatar);
+      if (normalizedAvatar) {
+        localStorage.setItem(avatarStorageKey, normalizedAvatar);
+      }
+
+      const payload = buildPayload(normalizedAvatar);
       const savedProfile = profile
         ? await updateMyProfile(token, payload)
         : await createProfile(token, payload);
 
       setProfile(savedProfile);
-      setMessage('Профіль успішно збережено');
+      if (savedProfile.avatarUrl) {
+        setAvatar(savedProfile.avatarUrl);
+        localStorage.setItem(avatarStorageKey, savedProfile.avatarUrl);
+      } else {
+        localStorage.removeItem(avatarStorageKey);
+      }
+      localStorage.setItem("profileUpdatedAt", String(Date.now()));
+      setMessage("Профіль успішно збережено");
     } catch (error) {
       console.error(error);
-      setMessage('Помилка збереження профілю');
+      setMessage(
+        error instanceof Error ? error.message : "Помилка збереження профілю",
+      );
     } finally {
       setSaving(false);
     }
@@ -156,7 +183,7 @@ function ProfilePage() {
             to="/dashboard"
             className="w-fit rounded-xl border border-cyan-500/30 bg-slate-900 px-4 py-2 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
           >
-            До Dashboard
+            До особистого кабінету
           </Link>
         </header>
 
@@ -200,7 +227,7 @@ function ProfilePage() {
                 </label>
 
                 <p className="mt-4 text-sm leading-6 text-slate-400">
-                  Аватар зберігається локально для демонстрації інтерфейсу.
+                  Аватар зберігається у профілі та відображається в кабінеті.
                 </p>
               </div>
             </section>
@@ -301,7 +328,9 @@ function ProfilePage() {
               </label>
 
               <label>
-                <span className="text-sm text-slate-300">Тренувань на тиждень</span>
+                <span className="text-sm text-slate-300">
+                  Тренувань на тиждень
+                </span>
                 <select
                   name="trainingDaysPerWeek"
                   value={form.trainingDaysPerWeek}
@@ -335,7 +364,7 @@ function ProfilePage() {
                   disabled={saving}
                   className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {saving ? 'Збереження...' : 'Зберегти профіль'}
+                  {saving ? "Збереження..." : "Зберегти профіль"}
                 </button>
 
                 <Link
@@ -351,6 +380,34 @@ function ProfilePage() {
       </div>
     </div>
   );
+}
+
+function resizeAvatar(dataUrl: string) {
+  return new Promise<string>((resolve) => {
+    const image = new Image();
+
+    image.onload = () => {
+      const maxSize = 512;
+      const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+
+      if (!context) {
+        resolve(dataUrl);
+        return;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      context.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.82));
+    };
+
+    image.onerror = () => resolve(dataUrl);
+    image.src = dataUrl;
+  });
 }
 
 export default ProfilePage;

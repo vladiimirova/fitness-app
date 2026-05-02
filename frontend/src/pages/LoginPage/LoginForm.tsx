@@ -1,5 +1,5 @@
-import type { ChangeEvent } from 'react';
-import type { LoginFormData } from '../../types';
+import type { ChangeEvent } from "react";
+import type { LoginFormData } from "../../types";
 
 type LoginFormProps = {
   form: LoginFormData;
@@ -9,14 +9,20 @@ type LoginFormProps = {
 
 function LoginForm({ form, onChange, onSubmit }: LoginFormProps) {
   return (
-    <div className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-lg shadow-black/20 sm:p-8">
-      <h1 className="text-center text-2xl font-semibold sm:text-3xl">
-        Вхід
-      </h1>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit();
+      }}
+      className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-lg shadow-black/20 sm:p-8"
+    >
+      <h1 className="text-center text-2xl font-semibold sm:text-3xl">Вхід</h1>
 
       <input
+        id="login-email"
         type="email"
         name="email"
+        autoComplete="email"
         placeholder="Введіть email"
         value={form.email}
         onChange={onChange}
@@ -24,8 +30,10 @@ function LoginForm({ form, onChange, onSubmit }: LoginFormProps) {
       />
 
       <input
+        id="login-password"
         type="password"
         name="password"
+        autoComplete="current-password"
         placeholder="Введіть пароль"
         value={form.password}
         onChange={onChange}
@@ -33,12 +41,12 @@ function LoginForm({ form, onChange, onSubmit }: LoginFormProps) {
       />
 
       <button
-        onClick={onSubmit}
+        type="submit"
         className="mt-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-indigo-500 sm:text-base"
       >
         Увійти
       </button>
-    </div>
+    </form>
   );
 }
 

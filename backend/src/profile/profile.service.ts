@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { userProfilesTable } from '../db/schema/user-profiles';
@@ -30,6 +34,7 @@ export class ProfileService {
         activityLevel: data.activityLevel,
         trainingDaysPerWeek: data.trainingDaysPerWeek,
         experienceLevel: data.experienceLevel,
+        avatarUrl: data.avatarUrl ?? null,
       })
       .returning();
 

@@ -1,4 +1,11 @@
-import { IsInt, IsNotEmpty, IsString, Max, Min } from 'class-validator';
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 
 export class CreateProfileDto {
   @IsString()
@@ -40,4 +47,8 @@ export class CreateProfileDto {
   @IsString()
   @IsNotEmpty()
   experienceLevel: string;
+
+  @IsOptional()
+  @IsString()
+  avatarUrl?: string;
 }

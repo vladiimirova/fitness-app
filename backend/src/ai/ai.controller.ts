@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AiService } from './ai.service';
 
@@ -22,5 +22,22 @@ export class AiController {
   @Post('program/me')
   generateMyProgram(@Req() req: { user: { userId: number; email: string } }) {
     return this.aiService.generateProgramForUser(req.user.userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('chat/me')
+  chatWithAi(
+    @Req() req: { user: { userId: number; email: string } },
+    @Body()
+    body: {
+      message?: string;
+      history?: Array<{ role?: string; text?: string }>;
+    },
+  ) {
+    return this.aiService.chatWithUser(
+      req.user.userId,
+      body.message ?? '',
+      body.history ?? [],
+    );
   }
 }

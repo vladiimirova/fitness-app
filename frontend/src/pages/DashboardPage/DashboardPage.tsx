@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { generateMyAiProgram, getMyAiProgram } from "../../api/ai";
+import {
+  generateMyAiProgram,
+  getMyAiProgram,
+  sendAiChatMessage,
+} from "../../api/ai";
 import { getMyProfile } from "../../api/profile";
+import { createProgressEntry, getMyProgressEntries } from "../../api/progress";
+import type { ProgressEntry, ProgressPayload } from "../../types";
 
 type ProfileData = {
   id: number;
@@ -15,6 +21,7 @@ type ProfileData = {
   activityLevel: string;
   trainingDaysPerWeek: number;
   experienceLevel: string;
+  avatarUrl?: string | null;
 } | null;
 
 type Exercise = {
@@ -47,7 +54,7 @@ type FullTrainingPlan = {
   weeks: WeekPlan[];
 } | null;
 
-type DashboardTab = "training" | "nutrition" | "progress";
+type DashboardTab = "training" | "nutrition" | "progress" | "chat";
 
 type MealIngredient = {
   name: string;
@@ -71,7 +78,18 @@ type NutritionWeekPlan = {
   days: MealDayPlan[];
 };
 
+type ProgressForm = ProgressPayload;
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "ai";
+  text: string;
+};
+
 type AiProgramResponse = {
+  profile?: {
+    goal?: string;
+  };
   source?: {
     ai?: string;
     savedProgramId?: number;
@@ -122,10 +140,37 @@ type AiProgramResponse = {
 };
 
 const avatarStorageKey = "profileAvatar";
+const progressStorageKey = "fitnessProgressEntries";
+const chatStorageKey = "fitnessAiChatMessages";
+const programCooldownDays = 28;
+
+function getNextProgramUpdateAt(savedAt: string | undefined) {
+  if (!savedAt) {
+    return null;
+  }
+
+  const date = new Date(savedAt);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  date.setDate(date.getDate() + programCooldownDays);
+  return date;
+}
+
+function formatDate(date: Date | null) {
+  if (!date) {
+    return "";
+  }
+
+  return date.toLocaleDateString("uk-UA");
+}
 
 function DashboardPage() {
   const navigate = useNavigate();
   const token = localStorage.getItem("token") || "";
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   const [profileData, setProfileData] = useState<ProfileData>(null);
   const [avatar, setAvatar] = useState<string>("");
@@ -138,6 +183,25 @@ function DashboardPage() {
   const [nutritionPlan, setNutritionPlan] = useState<NutritionWeekPlan[]>([]);
   const [isGeneratingProgram, setIsGeneratingProgram] =
     useState<boolean>(false);
+  const [nextProgramUpdateAt, setNextProgramUpdateAt] = useState<Date | null>(
+    null,
+  );
+  const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
+  const [isSavingProgress, setIsSavingProgress] = useState<boolean>(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>("");
+  const [isSendingChatMessage, setIsSendingChatMessage] =
+    useState<boolean>(false);
+  const [progressForm, setProgressForm] = useState<ProgressForm>({
+    date: new Date().toISOString().slice(0, 10),
+    weight: 0,
+    waist: 0,
+    completedWorkouts: 0,
+    energy: 7,
+    sleepHours: 7,
+    mood: 7,
+    notes: "",
+  });
 
   useEffect(() => {
     async function loadDashboardData() {
@@ -155,23 +219,63 @@ function DashboardPage() {
           setAvatar(storedAvatar);
         }
 
+        const storedProgress = localStorage.getItem(progressStorageKey);
+
+        if (storedProgress) {
+          const parsedProgress = JSON.parse(storedProgress) as ProgressEntry[];
+          setProgressEntries(parsedProgress);
+        }
+
+        const storedChat = localStorage.getItem(chatStorageKey);
+
+        if (storedChat) {
+          setChatMessages(JSON.parse(storedChat) as ChatMessage[]);
+        }
+
         const results = await Promise.allSettled([
           getMyProfile(token),
           getMyAiProgram(token),
+          getMyProgressEntries(token),
         ]);
 
         if (results[0].status === "fulfilled") {
           const profile = results[0].value;
           setProfileData(profile);
+
+          if (profile?.avatarUrl) {
+            setAvatar(profile.avatarUrl);
+            localStorage.setItem(avatarStorageKey, profile.avatarUrl);
+          } else if (!storedAvatar) {
+            setAvatar("");
+          }
         } else {
           console.error(results[0].reason);
           setMessage("Не вдалося завантажити профіль");
         }
 
         if (results[1].status === "fulfilled" && results[1].value) {
-          applyAiProgram(results[1].value);
+          const profile =
+            results[0].status === "fulfilled" ? results[0].value : null;
+          const savedProgram = results[1].value as AiProgramResponse;
+          const savedGoal = savedProgram.profile?.goal;
+
+          if (!profile || !savedGoal || savedGoal === profile.goal) {
+            applyAiProgram(savedProgram);
+          } else {
+            setFullPlan(null);
+            setNutritionPlan([]);
+            setNextProgramUpdateAt(null);
+          }
         } else if (results[1].status === "rejected") {
           console.error(results[1].reason);
+        }
+
+        if (results[2].status === "fulfilled") {
+          const entries = results[2].value;
+          setProgressEntries(entries);
+          localStorage.setItem(progressStorageKey, JSON.stringify(entries));
+        } else {
+          console.error(results[2].reason);
         }
       } catch (error) {
         console.error(error);
@@ -184,8 +288,29 @@ function DashboardPage() {
     loadDashboardData();
   }, [token, navigate]);
 
+  useEffect(() => {
+    if (activeTab !== "chat") {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      const chatScroll = chatScrollRef.current;
+
+      if (chatScroll) {
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+      }
+    });
+  }, [activeTab, chatMessages, isSendingChatMessage]);
+
   async function handleGenerateProgram() {
     if (isGeneratingProgram) {
+      return;
+    }
+
+    if (isProgramUpdateLocked) {
+      setMessage(
+        `План вже сформовано на 4 тижні. Оновити можна після ${formatDate(nextProgramUpdateAt)}.`,
+      );
       return;
     }
 
@@ -240,10 +365,146 @@ function DashboardPage() {
       setNutritionPlan([]);
     }
 
+    setNextProgramUpdateAt(getNextProgramUpdateAt(aiProgram.source?.savedAt));
+
     return {
       hasTraining: Boolean(aiTraining?.weeks?.length),
       hasNutrition: Boolean(aiNutrition.length),
     };
+  }
+
+  function handleProgressFieldChange(field: keyof ProgressForm, value: string) {
+    setProgressForm((current) => ({
+      ...current,
+      [field]: field === "date" || field === "notes" ? value : Number(value),
+    }));
+  }
+
+  async function handleSaveProgressEntry() {
+    if (isSavingProgress) {
+      return;
+    }
+
+    const payload: ProgressPayload = {
+      date: progressForm.date,
+      weight: progressForm.weight || profileData?.weight || 0,
+      waist: progressForm.waist,
+      completedWorkouts: progressForm.completedWorkouts,
+      energy: progressForm.energy,
+      sleepHours: progressForm.sleepHours,
+      mood: progressForm.mood,
+      notes: progressForm.notes,
+    };
+
+    try {
+      setIsSavingProgress(true);
+      const savedEntry = await createProgressEntry(token, payload);
+      const nextEntries = [...progressEntries, savedEntry]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .slice(-12);
+
+      setProgressEntries(nextEntries);
+      localStorage.setItem(progressStorageKey, JSON.stringify(nextEntries));
+      setMessage("Замір прогресу збережено");
+    } catch (error) {
+      console.error(error);
+      setMessage(
+        error instanceof Error
+          ? `Прогрес: ${error.message}`
+          : "Не вдалося зберегти замір прогресу",
+      );
+    } finally {
+      setIsSavingProgress(false);
+    }
+  }
+
+  async function handleSendChatMessage() {
+    const text = chatInput.trim();
+
+    if (!text || isSendingChatMessage) {
+      return;
+    }
+
+    const userMessage: ChatMessage = {
+      id: `${Date.now()}-user`,
+      role: "user",
+      text,
+    };
+    const nextMessages = [...chatMessages, userMessage];
+
+    setChatMessages(nextMessages);
+    localStorage.setItem(chatStorageKey, JSON.stringify(nextMessages));
+    setChatInput("");
+    setMessage("");
+
+    try {
+      setIsSendingChatMessage(true);
+      const response = await sendAiChatMessage(
+        token,
+        text,
+        chatMessages.slice(-8).map((item) => ({
+          role: item.role,
+          text: item.text,
+        })),
+      );
+      const aiMessage: ChatMessage = {
+        id: `${Date.now()}-ai`,
+        role: "ai",
+        text: response.answer,
+      };
+      const finalMessages = [...nextMessages, aiMessage].slice(-20);
+
+      setChatMessages(finalMessages);
+      localStorage.setItem(chatStorageKey, JSON.stringify(finalMessages));
+      setMessage("");
+    } catch (error) {
+      console.error(error);
+      setMessage(
+        error instanceof Error
+          ? `AI чат: ${error.message}`
+          : "AI чат тимчасово недоступний",
+      );
+    } finally {
+      setIsSendingChatMessage(false);
+    }
+  }
+
+  function getProgressReport() {
+    if (!progressEntries.length) {
+      return "Додай перший замір, щоб отримати звіт по прогресу.";
+    }
+
+    const first = progressEntries[0];
+    const latest = progressEntries[progressEntries.length - 1];
+    const weightDelta = latest.weight - first.weight;
+    const waistDelta = latest.waist - first.waist;
+    const avgEnergy = Math.round(
+      progressEntries.reduce((total, entry) => total + entry.energy, 0) /
+        progressEntries.length,
+    );
+    const avgSleep =
+      Math.round(
+        (progressEntries.reduce((total, entry) => total + entry.sleepHours, 0) /
+          progressEntries.length) *
+          10,
+      ) / 10;
+    const workoutTotal = progressEntries.reduce(
+      (total, entry) => total + entry.completedWorkouts,
+      0,
+    );
+    const goal = profileData?.goal ?? "";
+    const direction =
+      goal === "lose_weight" || goal === "lose weight"
+        ? weightDelta < 0
+          ? "вага рухається в потрібному напрямку"
+          : "вага поки не знижується, варто перевірити дефіцит і кроки"
+        : goal === "gain_muscle" || goal === "gain muscle"
+          ? weightDelta > 0
+            ? "є приріст ваги, стеж за силовими показниками і якістю набору"
+            : "вага поки не росте, варто додати калорійність або стабільність харчування"
+          : "динаміка виглядає стабільно";
+
+    return `За ${progressEntries.length} замірів: зміна ваги ${formatSignedNumber(weightDelta)} кг, талії ${formatSignedNumber(waistDelta)} см. Середня енергія ${avgEnergy}/10, сон ${avgSleep} год, виконано ${workoutTotal} тренувань. Висновок: ${direction}.`;
   }
 
   function handleLogout() {
@@ -303,60 +564,6 @@ function DashboardPage() {
     return experienceLevel;
   }
 
-  function getDailyCalories() {
-    if (!profileData) {
-      return 0;
-    }
-
-    const base =
-      profileData.gender === "male"
-        ? 10 * profileData.weight +
-          6.25 * profileData.height -
-          5 * profileData.age +
-          5
-        : 10 * profileData.weight +
-          6.25 * profileData.height -
-          5 * profileData.age -
-          161;
-
-    const activityMultiplier =
-      profileData.activityLevel === "high"
-        ? 1.55
-        : profileData.activityLevel === "low"
-          ? 1.25
-          : 1.4;
-
-    const goalAdjustment =
-      profileData.goal === "lose_weight" || profileData.goal === "lose weight"
-        ? -300
-        : profileData.goal === "gain_muscle" ||
-            profileData.goal === "gain muscle"
-          ? 250
-          : 0;
-
-    return Math.max(
-      1200,
-      Math.round(base * activityMultiplier + goalAdjustment),
-    );
-  }
-
-  function getNutritionTargets() {
-    const calories = getDailyCalories();
-    const protein = profileData ? Math.round(profileData.weight * 1.8) : 0;
-    const fat = profileData ? Math.round(profileData.weight * 0.8) : 0;
-    const carbs = Math.max(
-      0,
-      Math.round((calories - protein * 4 - fat * 9) / 4),
-    );
-
-    return {
-      calories,
-      protein,
-      fat,
-      carbs,
-    };
-  }
-
   function getMealWeight(meal: MealItem) {
     return meal.ingredients.reduce(
       (total, ingredient) => total + ingredient.grams,
@@ -372,6 +579,33 @@ function DashboardPage() {
     return meal.ingredients.reduce(function (total, ingredient) {
       return total + getIngredientCalories(ingredient);
     }, 0);
+  }
+
+  function getAiNutritionSummary() {
+    const allDays = nutritionPlan.flatMap((week) => week.days);
+    const filledDays = allDays.filter((day) => day.meals.length > 0);
+    const dailyCalories = filledDays.map((day) =>
+      day.meals.reduce((total, meal) => total + getMealCalories(meal), 0),
+    );
+    const totalCalories = dailyCalories.reduce(
+      (total, value) => total + value,
+      0,
+    );
+    const totalMeals = filledDays.reduce(
+      (total, day) => total + day.meals.length,
+      0,
+    );
+
+    return {
+      averageCalories: dailyCalories.length
+        ? Math.round(totalCalories / dailyCalories.length)
+        : 0,
+      daysCount: filledDays.length,
+      averageMeals: filledDays.length
+        ? Math.round((totalMeals / filledDays.length) * 10) / 10
+        : 0,
+      totalCalories,
+    };
   }
 
   function getDayTitle(dayNumber: number) {
@@ -423,17 +657,26 @@ function DashboardPage() {
     [nutritionPlan, activeNutritionWeek],
   );
 
-  const nutritionTargets = getNutritionTargets();
+  const nutritionSummary = getAiNutritionSummary();
+  const isProgramUpdateLocked = Boolean(
+    fullPlan &&
+    nextProgramUpdateAt &&
+    nextProgramUpdateAt.getTime() > Date.now(),
+  );
   const updatePlanLabel = isGeneratingProgram
     ? "Генерація..."
-    : fullPlan
-      ? "Оновити програму"
-      : "Сформувати програму";
+    : isProgramUpdateLocked
+      ? `Оновлення з ${formatDate(nextProgramUpdateAt)}`
+      : fullPlan
+        ? "Оновити програму"
+        : "Сформувати програму";
   const updateTrainingLabel = isGeneratingProgram
     ? "Генерація..."
-    : fullPlan
-      ? "Оновити план"
-      : "Сформувати план";
+    : isProgramUpdateLocked
+      ? `Доступно з ${formatDate(nextProgramUpdateAt)}`
+      : fullPlan
+        ? "Оновити план"
+        : "Сформувати план";
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-6 text-white sm:px-6 lg:px-8">
@@ -451,7 +694,7 @@ function DashboardPage() {
           <div className="flex flex-wrap items-center gap-3">
             <Link
               to="/"
-              className="rounded-xl border border-cyan-500/30 bg-slate-900 px-4 py-2 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
+              className="flex h-10 items-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
             >
               Головна
             </Link>
@@ -459,25 +702,24 @@ function DashboardPage() {
             <button
               type="button"
               onClick={handleOpenProfile}
-              className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 transition hover:bg-white/10"
+              className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 transition hover:bg-white/10"
               aria-label="Налаштування профілю"
               title="Налаштування профілю"
             >
               {renderAvatar(
-                "flex h-11 w-11 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-sm font-bold text-white",
+                "flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-xs font-bold text-white",
               )}
 
               <div className="text-left">
-                <p className="text-sm font-medium text-white">
+                <p className="text-sm font-medium leading-none text-white">
                   {profileData?.name || "Профіль"}
                 </p>
-                <p className="text-xs text-slate-400">Налаштування</p>
               </div>
             </button>
 
             <button
               onClick={handleLogout}
-              className="rounded-xl bg-slate-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-600"
+              className="flex h-10 items-center rounded-xl bg-slate-700 px-4 text-sm font-medium text-white transition hover:bg-slate-600"
             >
               Вийти
             </button>
@@ -520,7 +762,7 @@ function DashboardPage() {
                   <div className="mt-6 flex flex-wrap gap-3">
                     <button
                       onClick={handleGenerateProgram}
-                      disabled={isGeneratingProgram}
+                      disabled={isGeneratingProgram || isProgramUpdateLocked}
                       className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {updatePlanLabel}
@@ -615,6 +857,20 @@ function DashboardPage() {
                 >
                   Прогрес
                 </button>
+
+                <button
+                  type="button"
+                  onClick={function () {
+                    setActiveTab("chat");
+                  }}
+                  className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+                    activeTab === "chat"
+                      ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                      : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                  }`}
+                >
+                  AI чат
+                </button>
               </div>
             </section>
 
@@ -635,7 +891,7 @@ function DashboardPage() {
                       <button
                         type="button"
                         onClick={handleGenerateProgram}
-                        disabled={isGeneratingProgram}
+                        disabled={isGeneratingProgram || isProgramUpdateLocked}
                         className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-4 py-2 text-sm font-medium text-cyan-200 transition hover:bg-cyan-400/20 disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {updateTrainingLabel}
@@ -748,9 +1004,9 @@ function DashboardPage() {
                       Орієнтир харчування на 4 тижні
                     </h3>
                     <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
-                      Рекомендації розраховані за параметрами профілю та
-                      поточною ціллю. Денна норма лишається орієнтиром для
-                      кожного дня плану.
+                      Усі цифри нижче беруться тільки з AI-плану харчування.
+                      Якщо план ще не сформовано, ми не показуємо локальні
+                      розрахунки замість AI.
                     </p>
                   </div>
                 </div>
@@ -758,47 +1014,49 @@ function DashboardPage() {
                 <div className="mt-6 grid gap-4 md:grid-cols-4">
                   <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
                     <p className="text-xs uppercase tracking-wide text-slate-400">
-                      Калорії
+                      AI ккал
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.calories || "—"}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-400">ккал / день</p>
-                  </div>
-
-                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                    <p className="text-xs uppercase tracking-wide text-slate-400">
-                      Білки
-                    </p>
-                    <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.protein || "—"} г
+                      {nutritionSummary.averageCalories || "—"}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
-                      відновлення м’язів
+                      середнє за день
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
                     <p className="text-xs uppercase tracking-wide text-slate-400">
-                      Жири
+                      Днів меню
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.fat || "—"} г
+                      {nutritionSummary.daysCount || "—"}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
-                      енергія та гормони
+                      згенеровано AI з 28
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
                     <p className="text-xs uppercase tracking-wide text-slate-400">
-                      Вуглеводи
+                      Прийомів
                     </p>
                     <p className="mt-2 text-2xl font-semibold text-white">
-                      {nutritionTargets.carbs || "—"} г
+                      {nutritionSummary.averageMeals || "—"}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
-                      паливо для тренувань
+                      в середньому на день
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Ціль
+                    </p>
+                    <p className="mt-2 text-2xl font-semibold text-white">
+                      {profileData ? getGoalLabel(profileData.goal) : "—"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">
+                      поточний профіль
                     </p>
                   </div>
                 </div>
@@ -923,93 +1181,274 @@ function DashboardPage() {
             ) : null}
 
             {activeTab === "progress" ? (
-              <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-                <div>
+              <section className="mb-8 space-y-6">
+                <div className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
                   <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
                     Прогрес
                   </p>
                   <h3 className="mt-3 text-2xl font-bold text-white">
-                    Поточний стан і активність
+                    Оцінка стану та динаміки
                   </h3>
                   <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
-                    Тут показані основні показники, за якими можна оцінювати рух
-                    до цілі та регулярність тренувань.
+                    Заповнюй короткий замір раз на тиждень. Звіт підсумує вагу,
+                    талію, сон, енергію та виконані тренування.
                   </p>
 
-                  <div className="mt-6 grid gap-4 md:grid-cols-3">
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-400">
-                        Поточна вага
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData?.weight ? `${profileData.weight} кг` : "—"}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        оновлюється через профіль
-                      </p>
+                  <div className="mt-6 grid gap-4 lg:grid-cols-[1fr_1.1fr]">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-5">
+                      <h4 className="text-lg font-semibold text-white">
+                        Новий замір
+                      </h4>
+
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                        <label className="text-sm text-slate-300">
+                          Дата
+                          <input
+                            type="date"
+                            value={progressForm.date}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "date",
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+
+                        <label className="text-sm text-slate-300">
+                          Вага, кг
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.1"
+                            value={progressForm.weight || ""}
+                            placeholder={
+                              profileData?.weight
+                                ? String(profileData.weight)
+                                : "0"
+                            }
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "weight",
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+
+                        <label className="text-sm text-slate-300">
+                          Талія, см
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            value={progressForm.waist || ""}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "waist",
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+
+                        <label className="text-sm text-slate-300">
+                          Тренувань виконано
+                          <input
+                            type="number"
+                            min="0"
+                            max="14"
+                            value={progressForm.completedWorkouts}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "completedWorkouts",
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="mt-4 space-y-4">
+                        {[
+                          ["energy", "Енергія"],
+                          ["mood", "Настрій"],
+                        ].map(([field, label]) => (
+                          <label
+                            key={field}
+                            className="block text-sm text-slate-300"
+                          >
+                            <span className="flex justify-between">
+                              <span>{label}</span>
+                              <span>
+                                {progressForm[field as keyof ProgressForm]}/10
+                              </span>
+                            </span>
+                            <input
+                              type="range"
+                              min="1"
+                              max="10"
+                              value={Number(
+                                progressForm[field as keyof ProgressForm],
+                              )}
+                              onChange={(event) =>
+                                handleProgressFieldChange(
+                                  field as keyof ProgressForm,
+                                  event.target.value,
+                                )
+                              }
+                              className="mt-2 w-full accent-cyan-400"
+                            />
+                          </label>
+                        ))}
+
+                        <label className="block text-sm text-slate-300">
+                          Сон, год
+                          <input
+                            type="number"
+                            min="0"
+                            max="14"
+                            step="0.5"
+                            value={progressForm.sleepHours}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "sleepHours",
+                                event.target.value,
+                              )
+                            }
+                            className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+
+                        <label className="block text-sm text-slate-300">
+                          Нотатки
+                          <textarea
+                            value={progressForm.notes}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "notes",
+                                event.target.value,
+                              )
+                            }
+                            rows={3}
+                            className="mt-2 w-full resize-none rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleSaveProgressEntry}
+                        disabled={isSavingProgress}
+                        className="mt-5 rounded-xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+                      >
+                        {isSavingProgress ? "Збереження..." : "Зберегти замір"}
+                      </button>
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-400">
-                        Ціль
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData ? getGoalLabel(profileData.goal) : "—"}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        основний напрям програми
-                      </p>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-400">
-                        Тренувань
-                      </p>
-                      <p className="mt-2 text-2xl font-semibold text-white">
-                        {profileData?.trainingDaysPerWeek || "—"} / тиждень
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        планова регулярність
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/60 p-5">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <div>
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-5">
+                      <div className="flex items-center justify-between gap-3">
                         <h4 className="text-lg font-semibold text-white">
-                          Тижнева структура
+                          Графік прогресу
                         </h4>
-                        <p className="mt-1 text-sm text-slate-400">
-                          План розрахований на 4 тижні з поступовою
-                          регулярністю.
+                        <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
+                          {progressEntries.length} замірів
+                        </span>
+                      </div>
+
+                      <ProgressChart entries={progressEntries} />
+
+                      <div className="mt-5 rounded-xl bg-slate-900/80 p-4">
+                        <p className="text-xs uppercase tracking-wide text-cyan-300">
+                          Звіт
+                        </p>
+                        <p className="mt-2 text-sm leading-6 text-slate-200">
+                          {getProgressReport()}
                         </p>
                       </div>
-                      <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
-                        {fullPlan?.weeks.length || 0} / 4 тижні
-                      </span>
-                    </div>
-
-                    <div className="mt-5 grid gap-3 sm:grid-cols-4">
-                      {[1, 2, 3, 4].map(function (weekNumber) {
-                        const isReady = Boolean(
-                          fullPlan?.weeks.some(function (week) {
-                            return week.weekNumber === weekNumber;
-                          }),
-                        );
-
-                        return (
-                          <div
-                            key={weekNumber}
-                            className={`h-3 rounded-full ${
-                              isReady ? "bg-cyan-400" : "bg-slate-800"
-                            }`}
-                            title={`Тиждень ${weekNumber}`}
-                          />
-                        );
-                      })}
                     </div>
                   </div>
+                </div>
+              </section>
+            ) : null}
+
+            {activeTab === "chat" ? (
+              <section className="mb-8 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+                <div className="flex flex-col gap-2">
+                  <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
+                    AI чат
+                  </p>
+                  <h3 className="text-2xl font-bold text-white">
+                    Питання по програмі
+                  </h3>
+                </div>
+
+                <div
+                  ref={chatScrollRef}
+                  className="mt-6 h-[28rem] overflow-y-auto rounded-2xl border border-white/10 bg-slate-950/60 p-4 pr-3"
+                >
+                  {chatMessages.length ? (
+                    <div className="flex min-h-full flex-col justify-end space-y-3">
+                      {chatMessages.map((item) => (
+                        <div
+                          key={item.id}
+                          className={`flex ${
+                            item.role === "user"
+                              ? "justify-end"
+                              : "justify-start"
+                          }`}
+                        >
+                          <div
+                            className={`max-w-3xl rounded-2xl px-4 py-3 text-sm leading-6 ${
+                              item.role === "user"
+                                ? "bg-cyan-500 text-slate-950"
+                                : "border border-white/10 bg-white/5 text-slate-100"
+                            }`}
+                          >
+                            {item.text}
+                          </div>
+                        </div>
+                      ))}
+                      {isSendingChatMessage ? (
+                        <div className="flex justify-start">
+                          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+                            AI думає...
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-center text-sm text-slate-400">
+                      Запитай AI про тренування, харчування або прогрес.
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(event) => setChatInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void handleSendChatMessage();
+                      }
+                    }}
+                    placeholder="Наприклад: що змінити, якщо вага стоїть?"
+                    className="min-h-12 flex-1 rounded-xl border border-white/10 bg-slate-950/70 px-4 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSendChatMessage}
+                    disabled={isSendingChatMessage || !chatInput.trim()}
+                    className="min-h-12 rounded-xl bg-cyan-500 px-5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isSendingChatMessage ? "AI думає..." : "Надіслати"}
+                  </button>
                 </div>
               </section>
             ) : null}
@@ -1276,6 +1715,93 @@ function makeUniqueDishName(
   const numbered = `${normalized} #${dayNumber}`;
   usedDishNames.add(numbered);
   return numbered;
+}
+
+function formatSignedNumber(value: number) {
+  const rounded = Math.round(value * 10) / 10;
+  return rounded > 0 ? `+${rounded}` : String(rounded);
+}
+
+function ProgressChart({ entries }: { entries: ProgressEntry[] }) {
+  if (entries.length < 2) {
+    return (
+      <div className="mt-5 flex h-56 items-center justify-center rounded-xl border border-dashed border-white/10 bg-slate-900/70 text-sm text-slate-400">
+        Потрібно мінімум два заміри для графіка.
+      </div>
+    );
+  }
+
+  const width = 620;
+  const height = 220;
+  const padding = 28;
+  const weights = entries.map((entry) => entry.weight);
+  const minWeight = Math.min(...weights);
+  const maxWeight = Math.max(...weights);
+  const weightRange = Math.max(1, maxWeight - minWeight);
+  const points = entries.map((entry, index) => {
+    const x =
+      padding +
+      (index / Math.max(1, entries.length - 1)) * (width - padding * 2);
+    const y =
+      height -
+      padding -
+      ((entry.weight - minWeight) / weightRange) * (height - padding * 2);
+
+    return { x, y, entry };
+  });
+  const path = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
+
+  return (
+    <div className="mt-5 overflow-hidden rounded-xl bg-slate-900/70 p-3">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-56 w-full"
+        role="img"
+        aria-label="Графік ваги та енергії"
+      >
+        <line
+          x1={padding}
+          y1={height - padding}
+          x2={width - padding}
+          y2={height - padding}
+          stroke="rgba(148, 163, 184, 0.35)"
+        />
+        <path d={path} fill="none" stroke="#22d3ee" strokeWidth="4" />
+        {points.map((point) => {
+          const energyHeight = (point.entry.energy / 10) * 48;
+
+          return (
+            <g key={point.entry.id}>
+              <rect
+                x={point.x - 8}
+                y={height - padding - energyHeight}
+                width="16"
+                height={energyHeight}
+                rx="4"
+                fill="rgba(167, 139, 250, 0.55)"
+              />
+              <circle cx={point.x} cy={point.y} r="5" fill="#22d3ee" />
+              <text
+                x={point.x}
+                y={height - 6}
+                textAnchor="middle"
+                fontSize="11"
+                fill="#94a3b8"
+              >
+                {point.entry.date.slice(5)}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="flex flex-wrap gap-4 px-2 pb-1 text-xs text-slate-400">
+        <span className="text-cyan-300">Лінія: вага</span>
+        <span className="text-violet-300">Стовпчики: енергія</span>
+      </div>
+    </div>
+  );
 }
 
 export default DashboardPage;

@@ -50,3 +50,43 @@ export function getMyAiProgram(token: string) {
 export function generateMyAiProgram(token: string) {
   return requestAiProgram(token, "POST");
 }
+
+export async function sendAiChatMessage(
+  token: string,
+  message: string,
+  history: Array<{ role: "user" | "ai"; text: string }>,
+) {
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_URL}/ai/chat/me`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message, history }),
+    });
+  } catch {
+    throw new Error("Backend недоступний на localhost:3000");
+  }
+
+  if (!response.ok) {
+    let errorMessage = `Помилка AI чату (${response.status})`;
+
+    try {
+      const data = await response.json();
+      if (typeof data?.message === "string") {
+        errorMessage = data.message;
+      } else if (Array.isArray(data?.message) && data.message.length) {
+        errorMessage = String(data.message[0]);
+      }
+    } catch {
+      // keep fallback
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  return response.json() as Promise<{ answer: string }>;
+}

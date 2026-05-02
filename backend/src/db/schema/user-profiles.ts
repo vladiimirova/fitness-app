@@ -1,4 +1,4 @@
-import { integer, pgTable, varchar } from 'drizzle-orm/pg-core';
+import { integer, pgTable, text, varchar } from 'drizzle-orm/pg-core';
 import { authUsersTable } from './auth-users';
 
 export const userProfilesTable = pgTable('user_profiles', {
@@ -18,4 +18,5 @@ export const userProfilesTable = pgTable('user_profiles', {
   activityLevel: varchar('activity_level', { length: 255 }).notNull(),
   trainingDaysPerWeek: integer('training_days_per_week').notNull(),
   experienceLevel: varchar('experience_level', { length: 100 }).notNull(),
+  avatarUrl: text('avatar_url'),
 });

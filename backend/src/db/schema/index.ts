@@ -7,3 +7,4 @@ export * from './nutrition-plan-foods';
 export * from './training-plans';
 export * from './training-plan-exercises';
 export * from './ai-programs';
+export * from './progress-entries';

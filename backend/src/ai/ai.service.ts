@@ -49,6 +49,7 @@ type AiProgramResponse = {
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
+  private readonly programCooldownDays = 28;
 
   constructor(
     private readonly geminiService: GeminiService,
@@ -91,6 +92,71 @@ export class AiService {
     };
   }
 
+  async chatWithUser(
+    userId: number,
+    message: string,
+    history: Array<{ role?: string; text?: string }>,
+  ) {
+    const profile = await this.profileService.getMyProfile(userId);
+    const question = message.trim();
+
+    if (!profile) {
+      throw new BadRequestException('Profile is required for AI chat');
+    }
+
+    if (!question) {
+      throw new BadRequestException('Message is required');
+    }
+
+    if (question.length > 1200) {
+      throw new BadRequestException('Message is too long');
+    }
+
+    const historyText = history
+      .slice(-8)
+      .map((item) => {
+        const role = item.role === 'ai' ? 'AI' : 'Користувач';
+        return `${role}: ${(item.text ?? '').trim().slice(0, 500)}`;
+      })
+      .filter((line) => !line.endsWith(': '))
+      .join('\n');
+
+    const prompt = `
+Ти AI-чат у фітнес-застосунку. Відповідай як продовження вже відкритої розмови.
+
+Профіль користувача:
+- Вага: ${profile.weight} кг
+- Зріст: ${profile.height} см
+- Ціль: ${profile.goal}
+- Активність: ${profile.activityLevel}
+- Тренувань на тиждень: ${profile.trainingDaysPerWeek}
+- Рівень: ${profile.experienceLevel}
+
+Останні повідомлення:
+${historyText || 'Історії ще немає.'}
+
+Питання користувача:
+${question}
+
+Правила:
+- Не починай відповідь з привітання.
+- Не пиши "Привіт", "Вітаю", "Радий бачити", якщо це не перше повідомлення.
+- Не представляйся заново.
+- Не вигадуй медичних діагнозів.
+- Якщо питання про біль, травму, ліки або хворобу, порадь звернутися до лікаря.
+- Якщо користувач пише коротко або сумнівається, відповідай прямо по суті його останньої репліки.
+- Відповідай 2-5 реченнями, без markdown-таблиць.
+`;
+
+    const answer = await this.generateTextStep('AI чат', prompt, {
+      temperature: 0.35,
+      maxOutputTokens: 450,
+      responseMimeType: 'text/plain',
+    });
+
+    return { answer };
+  }
+
   async generateProgramForUser(userId: number) {
     const profile = await this.profileService.getMyProfile(userId);
 
@@ -100,19 +166,13 @@ export class AiService {
       );
     }
 
+    await this.assertProgramCanBeGenerated(userId);
+
     const variationToken = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
-    const trainingResponse = await this.generateJsonStep(
-      'генерація тренувань',
-      this.buildTrainingPrompt(profile, variationToken),
-      {
-        temperature: 0.6,
-        maxOutputTokens: 3000,
-        responseMimeType: 'application/json',
-      },
-    );
-    const trainingPlan = this.extractTrainingPlan(
-      await this.parseOrRepairJson(trainingResponse),
+    const trainingPlan = await this.generateTrainingPlanForProfile(
+      profile,
+      variationToken,
     );
     const nutritionDays: unknown[] = [];
 
@@ -196,7 +256,53 @@ export class AiService {
       return null;
     }
 
-    return latest.payload;
+    return this.withSavedProgramMeta(
+      latest.payload,
+      latest.id,
+      latest.createdAt,
+    );
+  }
+
+  private async assertProgramCanBeGenerated(userId: number) {
+    const programs = await db
+      .select()
+      .from(aiProgramsTable)
+      .where(eq(aiProgramsTable.userId, userId))
+      .orderBy(desc(aiProgramsTable.createdAt))
+      .limit(1);
+    const latest = programs[0];
+
+    if (!latest) {
+      return;
+    }
+
+    const nextAvailableAt = new Date(latest.createdAt);
+    nextAvailableAt.setDate(
+      nextAvailableAt.getDate() + this.programCooldownDays,
+    );
+
+    if (nextAvailableAt.getTime() > Date.now()) {
+      throw new BadRequestException(
+        `Оновити AI-програму можна після ${nextAvailableAt.toLocaleDateString('uk-UA')}. Поточний план розрахований на ${this.programCooldownDays} днів.`,
+      );
+    }
+  }
+
+  private withSavedProgramMeta(payload: unknown, id: number, createdAt: Date) {
+    if (!payload || typeof payload !== 'object') {
+      return payload;
+    }
+
+    const candidate = payload as AiProgramResponse;
+
+    return {
+      ...candidate,
+      source: {
+        ...candidate.source,
+        savedProgramId: candidate.source?.savedProgramId ?? id,
+        savedAt: candidate.source?.savedAt ?? createdAt,
+      },
+    };
   }
 
   private async generateJsonStep(
@@ -208,15 +314,197 @@ export class AiService {
       responseMimeType: 'application/json';
     },
   ) {
+    let lastMessage = '';
+
+    const maxAttempts = 4;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.geminiService.generateText(prompt, options);
+      } catch (error) {
+        lastMessage = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `AI step failed (${label}), attempt ${attempt}: ${lastMessage}`,
+        );
+
+        if (
+          lastMessage.includes('GEMINI_API_KEY') ||
+          lastMessage.includes('Квота Gemini') ||
+          lastMessage.includes('Модель Gemini')
+        ) {
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await this.delay(attempt * 1500);
+        }
+      }
+    }
+
+    throw new ServiceUnavailableException(
+      `AI не зміг виконати етап: ${label}. ${lastMessage}`,
+    );
+  }
+
+  private async generateTextStep(
+    label: string,
+    prompt: string,
+    options: {
+      temperature: number;
+      maxOutputTokens: number;
+      responseMimeType: 'text/plain';
+    },
+  ) {
+    let lastMessage = '';
+    const maxAttempts = 4;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.geminiService.generateText(prompt, options);
+      } catch (error) {
+        lastMessage = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `AI text step failed (${label}), attempt ${attempt}: ${lastMessage}`,
+        );
+
+        if (
+          lastMessage.includes('GEMINI_API_KEY') ||
+          lastMessage.includes('Квота Gemini') ||
+          lastMessage.includes('Модель Gemini')
+        ) {
+          break;
+        }
+
+        if (attempt < maxAttempts) {
+          await this.delay(attempt * 1500);
+        }
+      }
+    }
+
+    throw new ServiceUnavailableException(
+      `${label}: ${lastMessage || 'Gemini тимчасово недоступний'}`,
+    );
+  }
+
+  private delay(ms: number) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  private compactProgramForChat(program: unknown) {
+    if (!program || typeof program !== 'object') {
+      return 'Програма ще не сформована.';
+    }
+
+    const candidate = program as {
+      program?: {
+        trainingPlan?: {
+          title?: unknown;
+          days?: Array<{
+            dayNumber?: unknown;
+            focus?: unknown;
+            exercises?: Array<{ name?: unknown }>;
+          }>;
+        };
+        nutritionPlan?: {
+          days?: Array<{
+            dayNumber?: unknown;
+            meals?: Array<{ dishName?: unknown; mealType?: unknown }>;
+          }>;
+        };
+      };
+    };
+    const training = candidate.program?.trainingPlan;
+    const nutritionDays = candidate.program?.nutritionPlan?.days ?? [];
+    const trainingSummary = training?.days?.length
+      ? training.days
+          .slice(0, 3)
+          .map((day) => {
+            const exercises = (day.exercises ?? [])
+              .slice(0, 3)
+              .map((exercise) => exercise.name)
+              .filter(Boolean)
+              .join(', ');
+            return `день ${day.dayNumber}: ${day.focus ?? 'тренування'} (${exercises})`;
+          })
+          .join('; ')
+      : 'тренування ще не сформовані';
+    const nutritionSummary = nutritionDays.length
+      ? `харчування сформовано на ${nutritionDays.length} днів`
+      : 'харчування ще не сформоване';
+
+    return `Назва: ${training?.title ?? 'без назви'}. Тренування: ${trainingSummary}. Харчування: ${nutritionSummary}.`;
+  }
+
+  private async generateTrainingPlanForProfile(
+    profile: AiProfile,
+    variationToken: string,
+  ) {
     try {
-      return await this.geminiService.generateText(prompt, options);
+      const trainingResponse = await this.generateJsonStep(
+        'генерація тренувань',
+        this.buildTrainingPrompt(profile, variationToken),
+        {
+          temperature: 0.6,
+          maxOutputTokens: 2600,
+          responseMimeType: 'application/json',
+        },
+      );
+
+      const trainingPlan = this.extractTrainingPlan(
+        await this.parseOrRepairJson(trainingResponse),
+      );
+      const normalizedTrainingPlan =
+        this.normalizeTrainingPlanLanguage(trainingPlan);
+
+      if (
+        this.getTrainingDays(normalizedTrainingPlan).length ===
+        profile.trainingDaysPerWeek
+      ) {
+        return normalizedTrainingPlan;
+      }
+
+      throw new BadRequestException(
+        'AI returned an unexpected number of training days',
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`AI step failed (${label}): ${message}`);
-      throw new ServiceUnavailableException(
-        `AI не зміг виконати етап: ${label}`,
+      this.logger.warn(
+        `Full training generation failed, falling back to daily generation: ${message}`,
       );
     }
+
+    const days: unknown[] = [];
+
+    for (
+      let dayNumber = 1;
+      dayNumber <= profile.trainingDaysPerWeek;
+      dayNumber += 1
+    ) {
+      const dayResponse = await this.generateJsonStep(
+        `генерація тренування, день ${dayNumber}`,
+        this.buildTrainingDayPrompt(profile, dayNumber, variationToken),
+        {
+          temperature: 0.65,
+          maxOutputTokens: 1400,
+          responseMimeType: 'application/json',
+        },
+      );
+      const day = this.normalizeTrainingDayLanguage(
+        this.extractTrainingDay(
+          await this.parseOrRepairJson(dayResponse),
+          dayNumber,
+        ),
+      );
+
+      days.push(day);
+    }
+
+    return {
+      title: this.buildTrainingTitle(profile),
+      days,
+    };
   }
 
   private async generateNutritionDaysForRange(
@@ -334,9 +622,60 @@ export class AiService {
 - Не додавай дні відпочинку.
 - Для кожного тренувального дня 4-6 вправ.
 - Вправи мають бути безпечними для рівня користувача.
+- Усі текстові значення мають бути українською або усталеними українськими фітнес-термінами.
+- Заборонено англійські назви вправ: push-up, pull-up, squat, plank, bench press, deadlift, row, lunge, crunch, burpee, curl, press.
 - Не використовуй id.
 - Не використовуй коментарі, одинарні лапки, trailing comma або markdown.
 - Variation token: ${variationToken}
+`;
+  }
+
+  private buildTrainingDayPrompt(
+    profile: AiProfile,
+    dayNumber: number,
+    variationToken: string,
+  ) {
+    return `
+Ти AI-модуль фітнес-застосунку. Згенеруй ТІЛЬКИ один тренувальний день українською.
+
+Профіль користувача:
+- Ім'я: ${profile.name}
+- Вік: ${profile.age}
+- Стать: ${profile.gender}
+- Вага: ${profile.weight} кг
+- Зріст: ${profile.height} см
+- Ціль: ${profile.goal}
+- Активність: ${profile.activityLevel}
+- Тренувань на тиждень: ${profile.trainingDaysPerWeek}
+- Рівень: ${profile.experienceLevel}
+
+Поверни СУВОРО валідний JSON без markdown:
+{
+  "day": {
+    "dayNumber": ${dayNumber},
+    "focus": "string",
+    "exercises": [
+      {
+        "name": "string",
+        "muscleGroup": "string",
+        "equipment": "string | null",
+        "sets": 3,
+        "reps": 10
+      }
+    ]
+  }
+}
+
+Вимоги:
+- day.dayNumber має бути рівно ${dayNumber}.
+- Для дня 4-6 вправ.
+- Не додавай дні відпочинку.
+- Вправи мають бути безпечними для рівня користувача.
+- Усі текстові значення мають бути українською або усталеними українськими фітнес-термінами.
+- Заборонено англійські назви вправ: push-up, pull-up, squat, plank, bench press, deadlift, row, lunge, crunch, burpee, curl, press.
+- Не використовуй id.
+- Не використовуй коментарі, одинарні лапки, trailing comma або markdown.
+- Variation token: ${variationToken}-training-day-${dayNumber}
 `;
   }
 
@@ -408,6 +747,172 @@ export class AiService {
     }
 
     return candidate.trainingPlan;
+  }
+
+  private extractTrainingDay(value: unknown, expectedDayNumber: number) {
+    const candidate = value as {
+      day?: unknown;
+      days?: unknown[];
+      trainingPlan?: { days?: unknown[] };
+    };
+    const day =
+      candidate.day ??
+      candidate.days?.find(
+        (item) => this.getDayNumber(item) === expectedDayNumber,
+      ) ??
+      candidate.trainingPlan?.days?.find(
+        (item) => this.getDayNumber(item) === expectedDayNumber,
+      );
+
+    if (!day || typeof day !== 'object') {
+      throw new BadRequestException(
+        `AI returned training without day ${expectedDayNumber}`,
+      );
+    }
+
+    const exercises = (day as { exercises?: unknown[] }).exercises;
+
+    if (!Array.isArray(exercises) || exercises.length < 4) {
+      throw new BadRequestException(
+        `AI returned training day ${expectedDayNumber} without exercises`,
+      );
+    }
+
+    return {
+      ...(day as object),
+      dayNumber: expectedDayNumber,
+    };
+  }
+
+  private normalizeTrainingPlanLanguage(trainingPlan: unknown) {
+    if (!trainingPlan || typeof trainingPlan !== 'object') {
+      return trainingPlan;
+    }
+
+    const candidate = trainingPlan as { days?: unknown[]; title?: unknown };
+
+    return {
+      ...(trainingPlan as object),
+      title:
+        typeof candidate.title === 'string'
+          ? this.translateTrainingText(candidate.title)
+          : candidate.title,
+      days: Array.isArray(candidate.days)
+        ? candidate.days.map((day) => this.normalizeTrainingDayLanguage(day))
+        : candidate.days,
+    };
+  }
+
+  private normalizeTrainingDayLanguage(day: unknown) {
+    if (!day || typeof day !== 'object') {
+      return day;
+    }
+
+    const candidate = day as {
+      focus?: unknown;
+      exercises?: Array<{
+        name?: unknown;
+        muscleGroup?: unknown;
+        equipment?: unknown;
+      }>;
+    };
+
+    return {
+      ...(day as object),
+      focus:
+        typeof candidate.focus === 'string'
+          ? this.translateTrainingText(candidate.focus)
+          : candidate.focus,
+      exercises: Array.isArray(candidate.exercises)
+        ? candidate.exercises.map((exercise) => ({
+            ...exercise,
+            name:
+              typeof exercise.name === 'string'
+                ? this.translateTrainingText(exercise.name)
+                : exercise.name,
+            muscleGroup:
+              typeof exercise.muscleGroup === 'string'
+                ? this.translateTrainingText(exercise.muscleGroup)
+                : exercise.muscleGroup,
+            equipment:
+              typeof exercise.equipment === 'string'
+                ? this.translateTrainingText(exercise.equipment)
+                : exercise.equipment,
+          }))
+        : candidate.exercises,
+    };
+  }
+
+  private translateTrainingText(value: string) {
+    const replacements: Array<[RegExp, string]> = [
+      [/\bpush[- ]?ups?\b/gi, 'віджимання'],
+      [/\bpull[- ]?ups?\b/gi, 'підтягування'],
+      [/\bsquats?\b/gi, 'присідання'],
+      [/\bplanks?\b/gi, 'планка'],
+      [/\bbench press\b/gi, 'жим лежачи'],
+      [/\bdeadlifts?\b/gi, 'станова тяга'],
+      [/\brows?\b/gi, 'тяга'],
+      [/\blunges?\b/gi, 'випади'],
+      [/\bcrunch(es)?\b/gi, 'скручування'],
+      [/\bburpees?\b/gi, 'берпі'],
+      [/\bcurls?\b/gi, 'згинання рук'],
+      [/\bpress\b/gi, 'жим'],
+      [/\bchest\b/gi, 'груди'],
+      [/\bback\b/gi, 'спина'],
+      [/\blegs?\b/gi, 'ноги'],
+      [/\bshoulders?\b/gi, 'плечі'],
+      [/\barms?\b/gi, 'руки'],
+      [/\bcore\b/gi, 'кор'],
+      [/\babs?\b/gi, 'прес'],
+      [/\bdumbbells?\b/gi, 'гантелі'],
+      [/\bbarbells?\b/gi, 'штанга'],
+      [/\bbodyweight\b/gi, 'власна вага'],
+      [/\bresistance band\b/gi, 'еластична стрічка'],
+    ];
+
+    return replacements.reduce((text, [pattern, replacement]) => {
+      return text.replace(pattern, replacement);
+    }, value);
+  }
+
+  private getTrainingDays(trainingPlan: unknown) {
+    if (!trainingPlan || typeof trainingPlan !== 'object') {
+      return [];
+    }
+
+    const candidate = trainingPlan as { days?: unknown[] };
+    return Array.isArray(candidate.days) ? candidate.days : [];
+  }
+
+  private buildTrainingTitle(profile: AiProfile) {
+    const goal = this.getGoalLabel(profile.goal).toLowerCase();
+    const level = this.getExperienceLabel(
+      profile.experienceLevel,
+    ).toLowerCase();
+
+    return `AI програма для цілі: ${goal}, рівень: ${level}`;
+  }
+
+  private getGoalLabel(goal: string) {
+    const labels: Record<string, string> = {
+      lose_weight: 'Схуднення',
+      'lose weight': 'Схуднення',
+      maintain: 'Підтримка форми',
+      gain_muscle: "Набір м'язової маси",
+      'gain muscle': "Набір м'язової маси",
+    };
+
+    return labels[goal] ?? goal;
+  }
+
+  private getExperienceLabel(experienceLevel: string) {
+    const labels: Record<string, string> = {
+      beginner: 'Початковий',
+      intermediate: 'Середній',
+      advanced: 'Просунутий',
+    };
+
+    return labels[experienceLevel] ?? experienceLevel;
   }
 
   private extractNutritionDays(value: unknown) {

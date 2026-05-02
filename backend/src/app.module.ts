@@ -6,9 +6,17 @@ import { AuthModule } from './auth/auth.module';
 import { ProfileModule } from './profile/profile.module';
 import { TrainingModule } from './training/training.module';
 import { AiModule } from './ai/ai.module';
+import { ProgressModule } from './progress/progress.module';
 
 @Module({
-  imports: [UsersModule, AuthModule, ProfileModule, TrainingModule, AiModule],
+  imports: [
+    UsersModule,
+    AuthModule,
+    ProfileModule,
+    TrainingModule,
+    AiModule,
+    ProgressModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

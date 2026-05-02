@@ -6,6 +6,7 @@ import {
 
 type GeminiResponse = {
   candidates?: Array<{
+    finishReason?: string;
     content?: {
       parts?: Array<{
         text?: string;
@@ -76,13 +77,43 @@ export class GeminiService {
         );
       }
 
-      throw new ServiceUnavailableException('Gemini API request failed');
+      if (
+        response.status === 400 &&
+        (errorText.includes('not found') || errorText.includes('model'))
+      ) {
+        throw new ServiceUnavailableException(
+          `Модель Gemini "${this.model}" недоступна. Перевір GEMINI_MODEL у .env.`,
+        );
+      }
+
+      if (response.status === 404) {
+        throw new ServiceUnavailableException(
+          `Модель Gemini "${this.model}" не знайдена. Постав GEMINI_MODEL=gemini-1.5-flash і перезапусти backend.`,
+        );
+      }
+
+      if (response.status === 500 || response.status === 503) {
+        throw new ServiceUnavailableException(
+          `Gemini тимчасово недоступний або перевантажений (${response.status}).`,
+        );
+      }
+
+      throw new ServiceUnavailableException(
+        `Gemini API request failed (${response.status})`,
+      );
     }
 
     const data = (await response.json()) as GeminiResponse;
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidate = data.candidates?.[0];
+    const text = candidate?.content?.parts?.[0]?.text;
 
     if (!text) {
+      if (candidate?.finishReason) {
+        throw new ServiceUnavailableException(
+          `Gemini API returned an empty response (${candidate.finishReason})`,
+        );
+      }
+
       throw new ServiceUnavailableException(
         'Gemini API returned an empty response',
       );

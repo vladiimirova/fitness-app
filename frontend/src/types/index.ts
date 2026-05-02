@@ -13,6 +13,7 @@ export type ProfileFormData = {
   activityLevel: string;
   trainingDaysPerWeek: string;
   experienceLevel: string;
+  avatarUrl?: string | null;
 };
 
 export type UserProfile = {
@@ -27,6 +28,7 @@ export type UserProfile = {
   activityLevel: string;
   trainingDaysPerWeek: number;
   experienceLevel: string;
+  avatarUrl?: string | null;
 };
 
 export type ProfilePayload = {
@@ -39,4 +41,19 @@ export type ProfilePayload = {
   activityLevel: string;
   trainingDaysPerWeek: number;
   experienceLevel: string;
+  avatarUrl?: string | null;
 };
+
+export type ProgressEntry = {
+  id: string;
+  date: string;
+  weight: number;
+  waist: number;
+  completedWorkouts: number;
+  energy: number;
+  sleepHours: number;
+  mood: number;
+  notes: string;
+};
+
+export type ProgressPayload = Omit<ProgressEntry, "id">;
