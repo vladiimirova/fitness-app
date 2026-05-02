@@ -21,6 +21,8 @@ export class ProfileService {
       throw new BadRequestException('Profile already exists for this user');
     }
 
+    this.validateTargetWeight(data.weight, data.targetWeight, data.goal);
+
     const result = await db
       .insert(userProfilesTable)
       .values({
@@ -28,6 +30,7 @@ export class ProfileService {
         name: data.name,
         age: data.age,
         weight: data.weight,
+        targetWeight: data.targetWeight ?? null,
         height: data.height,
         gender: data.gender,
         goal: data.goal,
@@ -60,6 +63,18 @@ export class ProfileService {
       throw new NotFoundException('Profile not found');
     }
 
+    const current = existingProfile[0];
+    const nextTargetWeight =
+      'targetWeight' in data
+        ? (data.targetWeight ?? undefined)
+        : (current.targetWeight ?? undefined);
+
+    this.validateTargetWeight(
+      data.weight ?? current.weight,
+      nextTargetWeight,
+      data.goal ?? current.goal,
+    );
+
     const result = await db
       .update(userProfilesTable)
       .set({
@@ -69,5 +84,42 @@ export class ProfileService {
       .returning();
 
     return result[0];
+  }
+
+  private validateTargetWeight(
+    weight: number,
+    targetWeight: number | null | undefined,
+    goal: string,
+  ) {
+    if (!targetWeight) {
+      return;
+    }
+
+    if (
+      (goal === 'lose_weight' || goal === 'lose weight') &&
+      targetWeight >= weight
+    ) {
+      throw new BadRequestException(
+        'Для схуднення цільова вага має бути меншою за поточну',
+      );
+    }
+
+    if (
+      (goal === 'gain_muscle' || goal === 'gain muscle') &&
+      targetWeight <= weight
+    ) {
+      throw new BadRequestException(
+        'Для набору маси цільова вага має бути більшою за поточну',
+      );
+    }
+
+    if (
+      (goal === 'maintain' || goal === 'maintenance') &&
+      Math.abs(targetWeight - weight) > 2
+    ) {
+      throw new BadRequestException(
+        'Для підтримки форми цільова вага має бути близькою до поточної',
+      );
+    }
   }
 }

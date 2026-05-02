@@ -19,6 +19,10 @@ export class UpdateProfileDto {
 
   @IsOptional()
   @IsInt()
+  targetWeight?: number | null;
+
+  @IsOptional()
+  @IsInt()
   @Min(100)
   @Max(250)
   height?: number;

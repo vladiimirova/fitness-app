@@ -22,6 +22,10 @@ export class CreateProfileDto {
   @Max(300)
   weight: number;
 
+  @IsOptional()
+  @IsInt()
+  targetWeight?: number | null;
+
   @IsInt()
   @Min(100)
   @Max(250)

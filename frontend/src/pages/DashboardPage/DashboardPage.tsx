@@ -15,6 +15,7 @@ type ProfileData = {
   name: string;
   age: number;
   weight: number;
+  targetWeight?: number | null;
   height: number;
   gender: string;
   goal: string;
@@ -55,6 +56,7 @@ type FullTrainingPlan = {
 } | null;
 
 type DashboardTab = "training" | "nutrition" | "progress" | "chat";
+type ProgressPeriod = "day" | "week" | "month";
 
 type MealIngredient = {
   name: string;
@@ -167,6 +169,37 @@ function formatDate(date: Date | null) {
   return date.toLocaleDateString("uk-UA");
 }
 
+const progressPeriodLabels: Record<ProgressPeriod, string> = {
+  day: "День",
+  week: "Тиждень",
+  month: "Місяць",
+};
+
+function getProgressPeriodStart(period: ProgressPeriod) {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+
+  if (period === "week") {
+    date.setDate(date.getDate() - 6);
+  }
+
+  if (period === "month") {
+    date.setDate(date.getDate() - 29);
+  }
+
+  return date;
+}
+
+function isEntryInProgressPeriod(entry: ProgressEntry, period: ProgressPeriod) {
+  const entryDate = new Date(`${entry.date}T00:00:00`);
+
+  if (Number.isNaN(entryDate.getTime())) {
+    return false;
+  }
+
+  return entryDate >= getProgressPeriodStart(period);
+}
+
 function DashboardPage() {
   const navigate = useNavigate();
   const token = localStorage.getItem("token") || "";
@@ -186,7 +219,9 @@ function DashboardPage() {
   const [nextProgramUpdateAt, setNextProgramUpdateAt] = useState<Date | null>(
     null,
   );
+  const [programSavedAt, setProgramSavedAt] = useState<Date | null>(null);
   const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
+  const [progressPeriod, setProgressPeriod] = useState<ProgressPeriod>("week");
   const [isSavingProgress, setIsSavingProgress] = useState<boolean>(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>("");
@@ -196,10 +231,13 @@ function DashboardPage() {
     date: new Date().toISOString().slice(0, 10),
     weight: 0,
     waist: 0,
+    steps: 0,
     completedWorkouts: 0,
     energy: 7,
     sleepHours: 7,
     mood: 7,
+    followedNutrition: false,
+    completedTraining: false,
     notes: "",
   });
 
@@ -365,6 +403,13 @@ function DashboardPage() {
       setNutritionPlan([]);
     }
 
+    const savedAt = aiProgram.source?.savedAt
+      ? new Date(aiProgram.source.savedAt)
+      : null;
+
+    setProgramSavedAt(
+      savedAt && !Number.isNaN(savedAt.getTime()) ? savedAt : null,
+    );
     setNextProgramUpdateAt(getNextProgramUpdateAt(aiProgram.source?.savedAt));
 
     return {
@@ -376,7 +421,12 @@ function DashboardPage() {
   function handleProgressFieldChange(field: keyof ProgressForm, value: string) {
     setProgressForm((current) => ({
       ...current,
-      [field]: field === "date" || field === "notes" ? value : Number(value),
+      [field]:
+        field === "date" || field === "notes"
+          ? value
+          : field === "followedNutrition" || field === "completedTraining"
+            ? value === "true"
+            : Number(value),
     }));
   }
 
@@ -385,14 +435,26 @@ function DashboardPage() {
       return;
     }
 
+    const hasEntryForDate = progressEntries.some(
+      (entry) => entry.date === progressForm.date,
+    );
+
+    if (hasEntryForDate) {
+      setMessage("За цей день замір вже збережено");
+      return;
+    }
+
     const payload: ProgressPayload = {
       date: progressForm.date,
       weight: progressForm.weight || profileData?.weight || 0,
       waist: progressForm.waist,
-      completedWorkouts: progressForm.completedWorkouts,
+      steps: progressForm.steps,
+      completedWorkouts: progressForm.completedTraining ? 1 : 0,
       energy: progressForm.energy,
       sleepHours: progressForm.sleepHours,
       mood: progressForm.mood,
+      followedNutrition: progressForm.followedNutrition,
+      completedTraining: progressForm.completedTraining,
       notes: progressForm.notes,
     };
 
@@ -469,28 +531,41 @@ function DashboardPage() {
     }
   }
 
-  function getProgressReport() {
-    if (!progressEntries.length) {
+  function getProgressReport(entries: ProgressEntry[]) {
+    if (!entries.length) {
       return "Додай перший замір, щоб отримати звіт по прогресу.";
     }
 
-    const first = progressEntries[0];
-    const latest = progressEntries[progressEntries.length - 1];
+    const first = entries[0];
+    const latest = entries[entries.length - 1];
     const weightDelta = latest.weight - first.weight;
     const waistDelta = latest.waist - first.waist;
     const avgEnergy = Math.round(
-      progressEntries.reduce((total, entry) => total + entry.energy, 0) /
-        progressEntries.length,
+      entries.reduce((total, entry) => total + entry.energy, 0) /
+        entries.length,
     );
     const avgSleep =
       Math.round(
-        (progressEntries.reduce((total, entry) => total + entry.sleepHours, 0) /
-          progressEntries.length) *
+        (entries.reduce((total, entry) => total + entry.sleepHours, 0) /
+          entries.length) *
           10,
       ) / 10;
-    const workoutTotal = progressEntries.reduce(
-      (total, entry) => total + entry.completedWorkouts,
-      0,
+    const avgSteps = Math.round(
+      entries.reduce((total, entry) => total + (entry.steps || 0), 0) /
+        entries.length,
+    );
+    const workoutTotal = entries.filter(
+      (entry) => entry.completedTraining,
+    ).length;
+    const nutritionRate = Math.round(
+      (entries.filter((entry) => entry.followedNutrition).length /
+        entries.length) *
+        100,
+    );
+    const trainingRate = Math.round(
+      (entries.filter((entry) => entry.completedTraining).length /
+        entries.length) *
+        100,
     );
     const goal = profileData?.goal ?? "";
     const direction =
@@ -504,7 +579,7 @@ function DashboardPage() {
             : "вага поки не росте, варто додати калорійність або стабільність харчування"
           : "динаміка виглядає стабільно";
 
-    return `За ${progressEntries.length} замірів: зміна ваги ${formatSignedNumber(weightDelta)} кг, талії ${formatSignedNumber(waistDelta)} см. Середня енергія ${avgEnergy}/10, сон ${avgSleep} год, виконано ${workoutTotal} тренувань. Висновок: ${direction}.`;
+    return `За ${entries.length} денних відміток: зміна ваги ${formatSignedNumber(weightDelta)} кг, талії ${formatSignedNumber(waistDelta)} см. Середня енергія ${avgEnergy}/10, сон ${avgSleep} год, кроки ${avgSteps}/день. Тренування було у ${workoutTotal} днях, харчування дотримано у ${nutritionRate}% днів, тренування — у ${trainingRate}% днів. Висновок: ${direction}.`;
   }
 
   function handleLogout() {
@@ -658,10 +733,26 @@ function DashboardPage() {
   );
 
   const nutritionSummary = getAiNutritionSummary();
+  const visibleProgressEntries = useMemo(() => {
+    return progressEntries.filter((entry) =>
+      isEntryInProgressPeriod(entry, progressPeriod),
+    );
+  }, [progressEntries, progressPeriod]);
+  const hasProgressEntryForSelectedDate = progressEntries.some(
+    (entry) => entry.date === progressForm.date,
+  );
+  const profileUpdatedAt = Number(localStorage.getItem("profileUpdatedAt") || 0);
+  const isProfileChangedAfterProgram = Boolean(
+    fullPlan &&
+      programSavedAt &&
+      profileUpdatedAt &&
+      profileUpdatedAt > programSavedAt.getTime(),
+  );
   const isProgramUpdateLocked = Boolean(
     fullPlan &&
-    nextProgramUpdateAt &&
-    nextProgramUpdateAt.getTime() > Date.now(),
+      !isProfileChangedAfterProgram &&
+      nextProgramUpdateAt &&
+      nextProgramUpdateAt.getTime() > Date.now(),
   );
   const updatePlanLabel = isGeneratingProgram
     ? "Генерація..."
@@ -726,11 +817,18 @@ function DashboardPage() {
           </div>
         </header>
 
-        {message ? (
-          <div className="mb-6 rounded-2xl border border-violet-500/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100">
+        <div className="mb-6 min-h-14">
+          <div
+            className={`rounded-2xl border px-4 py-3 text-sm transition ${
+              message
+                ? "border-violet-500/20 bg-violet-500/10 text-violet-100 opacity-100"
+                : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
+            }`}
+            aria-live="polite"
+          >
             {message}
           </div>
-        ) : null}
+        </div>
 
         {loading ? (
           <div className="rounded-3xl border border-white/10 bg-white/5 p-8 text-center text-slate-300 backdrop-blur">
@@ -777,6 +875,17 @@ function DashboardPage() {
                     </p>
                     <p className="mt-2 text-base font-semibold text-white">
                       {profileData ? getGoalLabel(profileData.goal) : "—"}
+                    </p>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Бажана вага
+                    </p>
+                    <p className="mt-2 text-base font-semibold text-white">
+                      {profileData?.targetWeight
+                        ? `${profileData.targetWeight} кг`
+                        : "—"}
                     </p>
                   </div>
 
@@ -1256,19 +1365,52 @@ function DashboardPage() {
                         </label>
 
                         <label className="text-sm text-slate-300">
-                          Тренувань виконано
+                          Кроки сьогодні
                           <input
                             type="number"
                             min="0"
-                            max="14"
-                            value={progressForm.completedWorkouts}
+                            max="100000"
+                            step="100"
+                            value={progressForm.steps || ""}
                             onChange={(event) =>
                               handleProgressFieldChange(
-                                "completedWorkouts",
+                                "steps",
                                 event.target.value,
                               )
                             }
                             className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                        <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-slate-200">
+                          <span>Сьогодні дотримувалась харчування</span>
+                          <input
+                            type="checkbox"
+                            checked={progressForm.followedNutrition}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "followedNutrition",
+                                String(event.target.checked),
+                              )
+                            }
+                            className="h-5 w-5 accent-cyan-400"
+                          />
+                        </label>
+
+                        <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-slate-200">
+                          <span>Сьогодні тренування було</span>
+                          <input
+                            type="checkbox"
+                            checked={progressForm.completedTraining}
+                            onChange={(event) =>
+                              handleProgressFieldChange(
+                                "completedTraining",
+                                String(event.target.checked),
+                              )
+                            }
+                            className="h-5 w-5 accent-violet-400"
                           />
                         </label>
                       </div>
@@ -1343,31 +1485,60 @@ function DashboardPage() {
                       <button
                         type="button"
                         onClick={handleSaveProgressEntry}
-                        disabled={isSavingProgress}
-                        className="mt-5 rounded-xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+                        disabled={isSavingProgress || hasProgressEntryForSelectedDate}
+                        className="mt-5 rounded-xl bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {isSavingProgress ? "Збереження..." : "Зберегти замір"}
+                        {isSavingProgress
+                          ? "Збереження..."
+                          : hasProgressEntryForSelectedDate
+                            ? "Замір за день вже є"
+                            : "Зберегти замір"}
                       </button>
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-5">
-                      <div className="flex items-center justify-between gap-3">
-                        <h4 className="text-lg font-semibold text-white">
-                          Графік прогресу
-                        </h4>
-                        <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
-                          {progressEntries.length} замірів
-                        </span>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <h4 className="text-lg font-semibold text-white">
+                            Графік прогресу
+                          </h4>
+                          <span className="mt-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
+                            {visibleProgressEntries.length} замірів
+                          </span>
+                        </div>
+
+                        <div className="flex rounded-xl border border-white/10 bg-slate-900 p-1">
+                          {(["day", "week", "month"] as ProgressPeriod[]).map(
+                            (period) => {
+                              const isActive = progressPeriod === period;
+
+                              return (
+                                <button
+                                  key={period}
+                                  type="button"
+                                  onClick={() => setProgressPeriod(period)}
+                                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                                    isActive
+                                      ? "bg-cyan-400 text-slate-950"
+                                      : "text-slate-300 hover:bg-white/10 hover:text-white"
+                                  }`}
+                                >
+                                  {progressPeriodLabels[period]}
+                                </button>
+                              );
+                            },
+                          )}
+                        </div>
                       </div>
 
-                      <ProgressChart entries={progressEntries} />
+                      <ProgressChart entries={visibleProgressEntries} />
 
                       <div className="mt-5 rounded-xl bg-slate-900/80 p-4">
                         <p className="text-xs uppercase tracking-wide text-cyan-300">
                           Звіт
                         </p>
                         <p className="mt-2 text-sm leading-6 text-slate-200">
-                          {getProgressReport()}
+                          {getProgressReport(visibleProgressEntries)}
                         </p>
                       </div>
                     </div>
@@ -1759,7 +1930,7 @@ function ProgressChart({ entries }: { entries: ProgressEntry[] }) {
         viewBox={`0 0 ${width} ${height}`}
         className="h-56 w-full"
         role="img"
-        aria-label="Графік ваги та енергії"
+        aria-label="Графік ваги та дотримання плану"
       >
         <line
           x1={padding}
@@ -1771,16 +1942,42 @@ function ProgressChart({ entries }: { entries: ProgressEntry[] }) {
         <path d={path} fill="none" stroke="#22d3ee" strokeWidth="4" />
         {points.map((point) => {
           const energyHeight = (point.entry.energy / 10) * 48;
+          const nutritionHeight = point.entry.followedNutrition ? 34 : 8;
+          const trainingHeight = point.entry.completedTraining ? 34 : 8;
 
           return (
             <g key={point.entry.id}>
               <rect
-                x={point.x - 8}
+                x={point.x - 18}
                 y={height - padding - energyHeight}
-                width="16"
+                width="10"
                 height={energyHeight}
-                rx="4"
-                fill="rgba(167, 139, 250, 0.55)"
+                rx="3"
+                fill="rgba(167, 139, 250, 0.45)"
+              />
+              <rect
+                x={point.x - 5}
+                y={height - padding - nutritionHeight}
+                width="10"
+                height={nutritionHeight}
+                rx="3"
+                fill={
+                  point.entry.followedNutrition
+                    ? "rgba(34, 211, 238, 0.7)"
+                    : "rgba(71, 85, 105, 0.7)"
+                }
+              />
+              <rect
+                x={point.x + 8}
+                y={height - padding - trainingHeight}
+                width="10"
+                height={trainingHeight}
+                rx="3"
+                fill={
+                  point.entry.completedTraining
+                    ? "rgba(74, 222, 128, 0.7)"
+                    : "rgba(71, 85, 105, 0.7)"
+                }
               />
               <circle cx={point.x} cy={point.y} r="5" fill="#22d3ee" />
               <text
@@ -1798,7 +1995,9 @@ function ProgressChart({ entries }: { entries: ProgressEntry[] }) {
       </svg>
       <div className="flex flex-wrap gap-4 px-2 pb-1 text-xs text-slate-400">
         <span className="text-cyan-300">Лінія: вага</span>
-        <span className="text-violet-300">Стовпчики: енергія</span>
+        <span className="text-violet-300">Фіолетове: енергія</span>
+        <span className="text-cyan-300">Блакитне: харчування</span>
+        <span className="text-emerald-300">Зелене: тренування</span>
       </div>
     </div>
   );

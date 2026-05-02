@@ -7,6 +7,7 @@ export type ProfileFormData = {
   name: string;
   age: string;
   weight: string;
+  targetWeight: string;
   height: string;
   gender: string;
   goal: string;
@@ -22,6 +23,7 @@ export type UserProfile = {
   name: string;
   age: number;
   weight: number;
+  targetWeight?: number | null;
   height: number;
   gender: string;
   goal: string;
@@ -35,6 +37,7 @@ export type ProfilePayload = {
   name: string;
   age: number;
   weight: number;
+  targetWeight?: number | null;
   height: number;
   gender: string;
   goal: string;
@@ -49,10 +52,13 @@ export type ProgressEntry = {
   date: string;
   weight: number;
   waist: number;
+  steps: number;
   completedWorkouts: number;
   energy: number;
   sleepHours: number;
   mood: number;
+  followedNutrition: boolean;
+  completedTraining: boolean;
   notes: string;
 };
 

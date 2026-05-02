@@ -1,5 +1,6 @@
 import {
   IsDateString,
+  IsBoolean,
   IsInt,
   IsNumber,
   IsOptional,
@@ -24,6 +25,11 @@ export class CreateProgressEntryDto {
 
   @IsInt()
   @Min(0)
+  @Max(100000)
+  steps: number;
+
+  @IsInt()
+  @Min(0)
   @Max(14)
   completedWorkouts: number;
 
@@ -41,6 +47,12 @@ export class CreateProgressEntryDto {
   @Min(1)
   @Max(10)
   mood: number;
+
+  @IsBoolean()
+  followedNutrition: boolean;
+
+  @IsBoolean()
+  completedTraining: boolean;
 
   @IsOptional()
   @IsString()

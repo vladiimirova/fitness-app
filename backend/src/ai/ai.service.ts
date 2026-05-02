@@ -28,6 +28,19 @@ type AiProfile = NonNullable<
   Awaited<ReturnType<ProfileService['getMyProfile']>>
 >;
 
+type HybridRecommendationModel = {
+  normalizedFeatures: Record<string, number>;
+  cluster: {
+    id: string;
+    label: string;
+    distance: number;
+  };
+  regression: {
+    targetCalories: number;
+    trainingIntensity: number;
+  };
+};
+
 type AiProgramResponse = {
   profile: {
     name: string;
@@ -40,6 +53,9 @@ type AiProgramResponse = {
     generationMode: string;
     usesApiNinjas: false;
     variationToken: string;
+    profileFingerprint?: string;
+    profileSnapshot?: Record<string, unknown>;
+    hybridModel?: HybridRecommendationModel;
     savedProgramId?: number;
     savedAt?: Date;
   };
@@ -71,6 +87,7 @@ export class AiService {
 - Вік: ${profile.age}
 - Стать: ${profile.gender}
 - Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
 - Зріст: ${profile.height} см
 - Ціль: ${profile.goal}
 - Активність: ${profile.activityLevel}
@@ -126,6 +143,7 @@ export class AiService {
 
 Профіль користувача:
 - Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
 - Зріст: ${profile.height} см
 - Ціль: ${profile.goal}
 - Активність: ${profile.activityLevel}
@@ -166,12 +184,15 @@ ${question}
       );
     }
 
-    await this.assertProgramCanBeGenerated(userId);
+    await this.assertProgramCanBeGenerated(userId, profile);
 
     const variationToken = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const hybridModel = this.buildHybridRecommendationModel(profile);
+    const profileSnapshot = this.buildProfileSnapshot(profile);
 
     const trainingPlan = await this.generateTrainingPlanForProfile(
       profile,
+      hybridModel,
       variationToken,
     );
     const nutritionDays: unknown[] = [];
@@ -182,6 +203,7 @@ ${question}
       nutritionDays.push(
         ...(await this.generateNutritionDaysForRange(
           profile,
+          hybridModel,
           startDay,
           endDay,
           variationToken,
@@ -212,9 +234,12 @@ ${question}
       },
       source: {
         ai: 'gemini',
-        generationMode: 'ai_generated_names',
+        generationMode: 'hybrid_profile_ai_feedback',
         usesApiNinjas: false,
         variationToken,
+        profileFingerprint: this.buildProfileFingerprint(profileSnapshot),
+        profileSnapshot,
+        hybridModel,
       },
       program: parsed,
     };
@@ -263,7 +288,10 @@ ${question}
     );
   }
 
-  private async assertProgramCanBeGenerated(userId: number) {
+  private async assertProgramCanBeGenerated(
+    userId: number,
+    profile: AiProfile,
+  ) {
     const programs = await db
       .select()
       .from(aiProgramsTable)
@@ -273,6 +301,10 @@ ${question}
     const latest = programs[0];
 
     if (!latest) {
+      return;
+    }
+
+    if (this.isProfileChangedSinceProgram(latest.payload, profile)) {
       return;
     }
 
@@ -303,6 +335,51 @@ ${question}
         savedAt: candidate.source?.savedAt ?? createdAt,
       },
     };
+  }
+
+  private isProfileChangedSinceProgram(payload: unknown, profile: AiProfile) {
+    const currentSnapshot = this.buildProfileSnapshot(profile);
+    const currentFingerprint = this.buildProfileFingerprint(currentSnapshot);
+
+    if (!payload || typeof payload !== 'object') {
+      return true;
+    }
+
+    const candidate = payload as AiProgramResponse;
+
+    if (candidate.source?.profileFingerprint) {
+      return candidate.source.profileFingerprint !== currentFingerprint;
+    }
+
+    const savedSnapshot =
+      candidate.source?.profileSnapshot ??
+      (candidate.profile as Record<string, unknown> | undefined);
+
+    if (!savedSnapshot) {
+      return true;
+    }
+
+    return Object.entries(currentSnapshot).some(([key, value]) => {
+      return savedSnapshot[key] !== value;
+    });
+  }
+
+  private buildProfileSnapshot(profile: AiProfile) {
+    return {
+      age: profile.age,
+      gender: profile.gender,
+      weight: profile.weight,
+      targetWeight: profile.targetWeight ?? null,
+      height: profile.height,
+      goal: profile.goal,
+      activityLevel: profile.activityLevel,
+      trainingDaysPerWeek: profile.trainingDaysPerWeek,
+      experienceLevel: profile.experienceLevel,
+    };
+  }
+
+  private buildProfileFingerprint(snapshot: Record<string, unknown>) {
+    return JSON.stringify(snapshot);
   }
 
   private async generateJsonStep(
@@ -392,6 +469,183 @@ ${question}
     });
   }
 
+  private buildHybridRecommendationModel(
+    profile: AiProfile,
+  ): HybridRecommendationModel {
+    const normalizedFeatures = {
+      age: this.normalizeValue(profile.age, 12, 100),
+      weight: this.normalizeValue(profile.weight, 30, 300),
+      targetWeight: this.normalizeValue(
+        profile.targetWeight ?? profile.weight,
+        30,
+        300,
+      ),
+      weightDelta: this.normalizeValue(
+        (profile.targetWeight ?? profile.weight) - profile.weight,
+        -80,
+        80,
+      ),
+      height: this.normalizeValue(profile.height, 100, 250),
+      activity: this.normalizeValue(
+        this.getActivityScore(profile.activityLevel),
+        1,
+        3,
+      ),
+      trainingDays: this.normalizeValue(profile.trainingDaysPerWeek, 1, 7),
+      experience: this.normalizeValue(
+        this.getExperienceScore(profile.experienceLevel),
+        1,
+        3,
+      ),
+      goal: this.normalizeValue(this.getGoalScore(profile.goal), -1, 1),
+    };
+    const cluster = this.findNearestProfileCluster(normalizedFeatures);
+    const regression = this.calculateRegressionTargets(normalizedFeatures);
+
+    return {
+      normalizedFeatures,
+      cluster,
+      regression,
+    };
+  }
+
+  private normalizeValue(value: number, min: number, max: number) {
+    if (max === min) {
+      return 0;
+    }
+
+    const normalized = (value - min) / (max - min);
+    return Math.min(1, Math.max(0, Number(normalized.toFixed(4))));
+  }
+
+  private findNearestProfileCluster(features: Record<string, number>) {
+    const centroids = [
+      {
+        id: 'weight_loss_beginner',
+        label: 'схуднення з помірною інтенсивністю',
+        values: {
+          age: 0.25,
+          weight: 0.45,
+          targetWeight: 0.38,
+          weightDelta: 0.38,
+          height: 0.45,
+          activity: 0.25,
+          trainingDays: 0.35,
+          experience: 0.15,
+          goal: 0,
+        },
+      },
+      {
+        id: 'muscle_gain_regular',
+        label: "набір м'язової маси з регулярними силовими тренуваннями",
+        values: {
+          age: 0.3,
+          weight: 0.5,
+          targetWeight: 0.56,
+          weightDelta: 0.58,
+          height: 0.55,
+          activity: 0.7,
+          trainingDays: 0.55,
+          experience: 0.55,
+          goal: 1,
+        },
+      },
+      {
+        id: 'maintenance_active',
+        label: 'підтримка форми з активним режимом',
+        values: {
+          age: 0.35,
+          weight: 0.4,
+          targetWeight: 0.4,
+          weightDelta: 0.5,
+          height: 0.5,
+          activity: 0.75,
+          trainingDays: 0.45,
+          experience: 0.5,
+          goal: 0.5,
+        },
+      },
+    ];
+    const scored = centroids.map((centroid) => {
+      const distance = Math.sqrt(
+        Object.entries(centroid.values).reduce((total, [key, value]) => {
+          return total + (features[key] - value) ** 2;
+        }, 0),
+      );
+
+      return {
+        id: centroid.id,
+        label: centroid.label,
+        distance: Number(distance.toFixed(4)),
+      };
+    });
+
+    return scored.sort((a, b) => a.distance - b.distance)[0];
+  }
+
+  private calculateRegressionTargets(features: Record<string, number>) {
+    const targetCalories =
+      1400 +
+      900 * features.weight +
+      250 * features.targetWeight +
+      350 * features.height +
+      450 * features.activity +
+      220 * features.trainingDays +
+      180 * features.experience +
+      500 * (features.goal - 0.5) +
+      350 * (features.weightDelta - 0.5);
+    const trainingIntensity =
+      3 +
+      2.2 * features.activity +
+      1.8 * features.experience +
+      1.2 * features.trainingDays -
+      0.8 * features.age;
+
+    return {
+      targetCalories: Math.max(1200, Math.round(targetCalories)),
+      trainingIntensity: Math.min(
+        10,
+        Math.max(1, Number(trainingIntensity.toFixed(1))),
+      ),
+    };
+  }
+
+  private formatTargetWeight(profile: AiProfile) {
+    return profile.targetWeight ? `${profile.targetWeight} кг` : 'не вказана';
+  }
+
+  private getActivityScore(activityLevel: string) {
+    const scores: Record<string, number> = {
+      low: 1,
+      medium: 2,
+      high: 3,
+    };
+
+    return scores[activityLevel] ?? 2;
+  }
+
+  private getExperienceScore(experienceLevel: string) {
+    const scores: Record<string, number> = {
+      beginner: 1,
+      intermediate: 2,
+      advanced: 3,
+    };
+
+    return scores[experienceLevel] ?? 1;
+  }
+
+  private getGoalScore(goal: string) {
+    if (goal === 'lose_weight' || goal === 'lose weight') {
+      return -1;
+    }
+
+    if (goal === 'gain_muscle' || goal === 'gain muscle') {
+      return 1;
+    }
+
+    return 0;
+  }
+
   private compactProgramForChat(program: unknown) {
     if (!program || typeof program !== 'object') {
       return 'Програма ще не сформована.';
@@ -439,12 +693,13 @@ ${question}
 
   private async generateTrainingPlanForProfile(
     profile: AiProfile,
+    hybridModel: HybridRecommendationModel,
     variationToken: string,
   ) {
     try {
       const trainingResponse = await this.generateJsonStep(
         'генерація тренувань',
-        this.buildTrainingPrompt(profile, variationToken),
+        this.buildTrainingPrompt(profile, hybridModel, variationToken),
         {
           temperature: 0.6,
           maxOutputTokens: 2600,
@@ -484,7 +739,12 @@ ${question}
     ) {
       const dayResponse = await this.generateJsonStep(
         `генерація тренування, день ${dayNumber}`,
-        this.buildTrainingDayPrompt(profile, dayNumber, variationToken),
+        this.buildTrainingDayPrompt(
+          profile,
+          hybridModel,
+          dayNumber,
+          variationToken,
+        ),
         {
           temperature: 0.65,
           maxOutputTokens: 1400,
@@ -509,6 +769,7 @@ ${question}
 
   private async generateNutritionDaysForRange(
     profile: AiProfile,
+    hybridModel: HybridRecommendationModel,
     startDay: number,
     endDay: number,
     variationToken: string,
@@ -516,7 +777,13 @@ ${question}
     try {
       const nutritionResponse = await this.generateJsonStep(
         `генерація харчування, дні ${startDay}-${endDay}`,
-        this.buildNutritionPrompt(profile, startDay, endDay, variationToken),
+        this.buildNutritionPrompt(
+          profile,
+          hybridModel,
+          startDay,
+          endDay,
+          variationToken,
+        ),
         {
           temperature: 0.7,
           maxOutputTokens: 5000,
@@ -551,6 +818,7 @@ ${question}
         `генерація харчування, день ${dayNumber}`,
         this.buildNutritionPrompt(
           profile,
+          hybridModel,
           dayNumber,
           dayNumber,
           variationToken,
@@ -580,7 +848,11 @@ ${question}
     return days;
   }
 
-  private buildTrainingPrompt(profile: AiProfile, variationToken: string) {
+  private buildTrainingPrompt(
+    profile: AiProfile,
+    hybridModel: HybridRecommendationModel,
+    variationToken: string,
+  ) {
     return `
 Ти AI-модуль фітнес-застосунку. Згенеруй ТІЛЬКИ план тренувань українською.
 
@@ -589,11 +861,18 @@ ${question}
 - Вік: ${profile.age}
 - Стать: ${profile.gender}
 - Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
 - Зріст: ${profile.height} см
 - Ціль: ${profile.goal}
 - Активність: ${profile.activityLevel}
 - Тренувань на тиждень: ${profile.trainingDaysPerWeek}
 - Рівень: ${profile.experienceLevel}
+
+Результат гібридної рекомендаційної моделі:
+- Нормалізовані ознаки: ${JSON.stringify(hybridModel.normalizedFeatures)}
+- Кластер користувача за k-means моделлю: ${hybridModel.cluster.label}
+- Регресійна ціль калорійності: ${hybridModel.regression.targetCalories} ккал/день
+- Регресійна інтенсивність тренувань: ${hybridModel.regression.trainingIntensity}/10
 
 Поверни СУВОРО валідний JSON без markdown:
 {
@@ -622,6 +901,7 @@ ${question}
 - Не додавай дні відпочинку.
 - Для кожного тренувального дня 4-6 вправ.
 - Вправи мають бути безпечними для рівня користувача.
+- Інтенсивність тренувань узгоджуй з регресійним значенням ${hybridModel.regression.trainingIntensity}/10.
 - Усі текстові значення мають бути українською або усталеними українськими фітнес-термінами.
 - Заборонено англійські назви вправ: push-up, pull-up, squat, plank, bench press, deadlift, row, lunge, crunch, burpee, curl, press.
 - Не використовуй id.
@@ -632,6 +912,7 @@ ${question}
 
   private buildTrainingDayPrompt(
     profile: AiProfile,
+    hybridModel: HybridRecommendationModel,
     dayNumber: number,
     variationToken: string,
   ) {
@@ -643,11 +924,14 @@ ${question}
 - Вік: ${profile.age}
 - Стать: ${profile.gender}
 - Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
 - Зріст: ${profile.height} см
 - Ціль: ${profile.goal}
 - Активність: ${profile.activityLevel}
 - Тренувань на тиждень: ${profile.trainingDaysPerWeek}
 - Рівень: ${profile.experienceLevel}
+- Кластер користувача: ${hybridModel.cluster.label}
+- Регресійна інтенсивність тренувань: ${hybridModel.regression.trainingIntensity}/10
 
 Поверни СУВОРО валідний JSON без markdown:
 {
@@ -681,6 +965,7 @@ ${question}
 
   private buildNutritionPrompt(
     profile: AiProfile,
+    hybridModel: HybridRecommendationModel,
     startDay: number,
     endDay: number,
     variationToken: string,
@@ -698,10 +983,13 @@ ${question}
 - Вік: ${profile.age}
 - Стать: ${profile.gender}
 - Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
 - Зріст: ${profile.height} см
 - Ціль: ${profile.goal}
 - Активність: ${profile.activityLevel}
 - Рівень: ${profile.experienceLevel}
+- Кластер користувача: ${hybridModel.cluster.label}
+- Регресійна ціль калорійності: ${hybridModel.regression.targetCalories} ккал/день
 
 Поверни СУВОРО валідний JSON без markdown:
 {
@@ -724,6 +1012,7 @@ ${question}
 Вимоги:
 - ${dayRequirement}
 - На день 3-4 прийоми їжі.
+- Сумарну калорійність дня тримай близько ${hybridModel.regression.targetCalories} ккал.
 - На день не повторюй mealType.
 - Кожен dishName має бути людською назвою страви, не списком інгредієнтів.
 - У назві страви не пиши "Сніданок", "Обід", "Вечеря", "Перекус".

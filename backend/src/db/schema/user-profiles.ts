@@ -12,6 +12,7 @@ export const userProfilesTable = pgTable('user_profiles', {
   name: varchar('name', { length: 255 }).notNull(),
   age: integer('age').notNull(),
   weight: integer('weight').notNull(),
+  targetWeight: integer('target_weight'),
   height: integer('height').notNull(),
   gender: varchar('gender', { length: 50 }).notNull(),
   goal: varchar('goal', { length: 255 }).notNull(),

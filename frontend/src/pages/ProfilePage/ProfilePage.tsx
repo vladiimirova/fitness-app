@@ -12,6 +12,7 @@ const defaultForm: ProfileFormData = {
   name: "",
   age: "",
   weight: "",
+  targetWeight: "",
   height: "",
   gender: "female",
   goal: "lose_weight",
@@ -60,6 +61,7 @@ function ProfilePage() {
             name: data.name,
             age: String(data.age),
             weight: String(data.weight),
+            targetWeight: data.targetWeight ? String(data.targetWeight) : "",
             height: String(data.height),
             gender: data.gender,
             goal: data.goal,
@@ -119,6 +121,7 @@ function ProfilePage() {
       name: form.name.trim(),
       age: Number(form.age),
       weight: Number(form.weight),
+      targetWeight: form.targetWeight ? Number(form.targetWeight) : null,
       height: Number(form.height),
       gender: form.gender,
       goal: form.goal,
@@ -135,6 +138,17 @@ function ProfilePage() {
     try {
       setSaving(true);
       setMessage("");
+
+      const validationMessage = getTargetWeightValidationMessage(
+        Number(form.weight),
+        form.targetWeight ? Number(form.targetWeight) : null,
+        form.goal,
+      );
+
+      if (validationMessage) {
+        setMessage(validationMessage);
+        return;
+      }
 
       const normalizedAvatar = avatar ? await resizeAvatar(avatar) : "";
       setAvatar(normalizedAvatar);
@@ -187,11 +201,18 @@ function ProfilePage() {
           </Link>
         </header>
 
-        {message ? (
-          <div className="mb-6 rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+        <div className="mb-6 min-h-14">
+          <div
+            className={`rounded-2xl border px-4 py-3 text-sm transition ${
+              message
+                ? "border-cyan-500/20 bg-cyan-500/10 text-cyan-100 opacity-100"
+                : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
+            }`}
+            aria-live="polite"
+          >
             {message}
           </div>
-        ) : null}
+        </div>
 
         {loading ? (
           <div className="rounded-3xl border border-white/10 bg-white/5 p-8 text-center text-slate-300">
@@ -200,10 +221,11 @@ function ProfilePage() {
         ) : (
           <form
             onSubmit={handleSubmit}
+            noValidate
             className="grid gap-6 rounded-3xl border border-white/10 bg-white/5 p-5 backdrop-blur sm:p-6 lg:grid-cols-[0.8fr_1.2fr]"
           >
-            <section className="rounded-2xl border border-white/10 bg-slate-950/60 p-5">
-              <div className="flex flex-col items-center text-center">
+            <section className="flex min-h-[28rem] items-center justify-center rounded-2xl border border-white/10 bg-slate-950/60 p-5">
+              <div className="flex flex-col items-center justify-center text-center">
                 <div className="flex h-32 w-32 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-4xl font-bold text-white">
                   {avatar ? (
                     <img
@@ -225,10 +247,6 @@ function ProfilePage() {
                     onChange={handleAvatarChange}
                   />
                 </label>
-
-                <p className="mt-4 text-sm leading-6 text-slate-400">
-                  Аватар зберігається у профілі та відображається в кабінеті.
-                </p>
               </div>
             </section>
 
@@ -264,7 +282,7 @@ function ProfilePage() {
                   name="gender"
                   value={form.gender}
                   onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 pr-11 text-sm text-white outline-none transition focus:border-cyan-400"
                 >
                   <option value="female">Жіноча</option>
                   <option value="male">Чоловіча</option>
@@ -281,6 +299,26 @@ function ProfilePage() {
                   value={form.weight}
                   onChange={handleChange}
                   required
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                />
+              </label>
+
+              <label>
+                <span className="text-sm text-slate-300">
+                  Бажана вага, кг
+                </span>
+                <input
+                  type="number"
+                  name="targetWeight"
+                  value={form.targetWeight}
+                  onChange={handleChange}
+                  placeholder={
+                    form.goal === "lose_weight"
+                      ? "Менше поточної"
+                      : form.goal === "gain_muscle"
+                        ? "Більше поточної"
+                      : "Майже як поточна"
+                  }
                   className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
                 />
               </label>
@@ -305,7 +343,7 @@ function ProfilePage() {
                   name="goal"
                   value={form.goal}
                   onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 pr-11 text-sm text-white outline-none transition focus:border-cyan-400"
                 >
                   <option value="lose_weight">Схуднення</option>
                   <option value="gain_muscle">Набір м’язової маси</option>
@@ -319,7 +357,7 @@ function ProfilePage() {
                   name="activityLevel"
                   value={form.activityLevel}
                   onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 pr-11 text-sm text-white outline-none transition focus:border-cyan-400"
                 >
                   <option value="low">Низька</option>
                   <option value="medium">Середня</option>
@@ -335,7 +373,7 @@ function ProfilePage() {
                   name="trainingDaysPerWeek"
                   value={form.trainingDaysPerWeek}
                   onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 pr-11 text-sm text-white outline-none transition focus:border-cyan-400"
                 >
                   <option value="2">2</option>
                   <option value="3">3</option>
@@ -350,7 +388,7 @@ function ProfilePage() {
                   name="experienceLevel"
                   value={form.experienceLevel}
                   onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-950 px-4 py-3 pr-11 text-sm text-white outline-none transition focus:border-cyan-400"
                 >
                   <option value="beginner">Початковий</option>
                   <option value="intermediate">Середній</option>
@@ -408,6 +446,42 @@ function resizeAvatar(dataUrl: string) {
     image.onerror = () => resolve(dataUrl);
     image.src = dataUrl;
   });
+}
+
+function getTargetWeightValidationMessage(
+  weight: number,
+  targetWeight: number | null,
+  goal: string,
+) {
+  if (targetWeight === null) {
+    return "";
+  }
+
+  if (!Number.isFinite(targetWeight) || targetWeight <= 0) {
+    if (goal === "lose_weight") {
+      return "Для схуднення бажана вага має бути меншою за поточну";
+    }
+
+    if (goal === "gain_muscle") {
+      return "Для набору маси бажана вага має бути більшою за поточну";
+    }
+
+    return "Для підтримки форми бажана вага має бути близькою до поточної";
+  }
+
+  if (goal === "lose_weight" && targetWeight >= weight) {
+    return "Для схуднення бажана вага має бути меншою за поточну";
+  }
+
+  if (goal === "gain_muscle" && targetWeight <= weight) {
+    return "Для набору маси бажана вага має бути більшою за поточну";
+  }
+
+  if (goal === "maintain" && Math.abs(targetWeight - weight) > 2) {
+    return "Для підтримки форми бажана вага має бути близькою до поточної";
+  }
+
+  return "";
 }
 
 export default ProfilePage;
