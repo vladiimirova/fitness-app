@@ -88,6 +88,14 @@ type ChatMessage = {
   text: string;
 };
 
+type ChatSession = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ChatMessage[];
+};
+
 type AiProgramResponse = {
   profile?: {
     goal?: string;
@@ -144,7 +152,46 @@ type AiProgramResponse = {
 const avatarStorageKey = "profileAvatar";
 const progressStorageKey = "fitnessProgressEntries";
 const chatStorageKey = "fitnessAiChatMessages";
+const chatSessionsStorageKey = "fitnessAiChatSessions";
 const programCooldownDays = 28;
+
+function createChatSession(messages: ChatMessage[] = []): ChatSession {
+  const now = new Date().toISOString();
+
+  return {
+    id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+    title: getChatSessionTitle(messages),
+    createdAt: now,
+    updatedAt: now,
+    messages,
+  };
+}
+
+function getChatSessionTitle(messages: ChatMessage[]) {
+  const firstUserMessage = messages.find((item) => item.role === "user");
+  const text = firstUserMessage?.text.trim();
+
+  if (!text) {
+    return "Новий чат";
+  }
+
+  return text.length > 34 ? `${text.slice(0, 34)}...` : text;
+}
+
+function saveChatSessionsToStorage(sessions: ChatSession[]) {
+  localStorage.setItem(chatSessionsStorageKey, JSON.stringify(sessions));
+}
+
+function upsertChatSession(
+  sessions: ChatSession[],
+  nextSession: ChatSession,
+) {
+  const withoutCurrent = sessions.filter(
+    (session) => session.id !== nextSession.id,
+  );
+
+  return [nextSession, ...withoutCurrent].slice(0, 12);
+}
 
 function getNextProgramUpdateAt(savedAt: string | undefined) {
   if (!savedAt) {
@@ -223,7 +270,10 @@ function DashboardPage() {
   const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
   const [progressPeriod, setProgressPeriod] = useState<ProgressPeriod>("week");
   const [isSavingProgress, setIsSavingProgress] = useState<boolean>(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([
+    createChatSession(),
+  ]);
+  const [activeChatId, setActiveChatId] = useState<string>("");
   const [chatInput, setChatInput] = useState<string>("");
   const [isSendingChatMessage, setIsSendingChatMessage] =
     useState<boolean>(false);
@@ -240,6 +290,14 @@ function DashboardPage() {
     completedTraining: false,
     notes: "",
   });
+
+  const activeChatSession = useMemo(() => {
+    return (
+      chatSessions.find((session) => session.id === activeChatId) ??
+      chatSessions[0]
+    );
+  }, [chatSessions, activeChatId]);
+  const chatMessages = activeChatSession?.messages ?? [];
 
   useEffect(() => {
     async function loadDashboardData() {
@@ -264,10 +322,33 @@ function DashboardPage() {
           setProgressEntries(parsedProgress);
         }
 
+        const storedChatSessions = localStorage.getItem(chatSessionsStorageKey);
         const storedChat = localStorage.getItem(chatStorageKey);
 
-        if (storedChat) {
-          setChatMessages(JSON.parse(storedChat) as ChatMessage[]);
+        if (storedChatSessions) {
+          const parsedSessions = JSON.parse(
+            storedChatSessions,
+          ) as ChatSession[];
+
+          if (parsedSessions.length) {
+            setChatSessions(parsedSessions);
+            setActiveChatId(parsedSessions[0].id);
+          }
+        } else if (storedChat) {
+          const migratedSession = createChatSession(
+            JSON.parse(storedChat) as ChatMessage[],
+          );
+
+          setChatSessions([migratedSession]);
+          setActiveChatId(migratedSession.id);
+          saveChatSessionsToStorage([migratedSession]);
+          localStorage.removeItem(chatStorageKey);
+        } else {
+          const emptySession = createChatSession();
+
+          setChatSessions([emptySession]);
+          setActiveChatId(emptySession.id);
+          saveChatSessionsToStorage([emptySession]);
         }
 
         const results = await Promise.allSettled([
@@ -338,7 +419,7 @@ function DashboardPage() {
         chatScroll.scrollTop = chatScroll.scrollHeight;
       }
     });
-  }, [activeTab, chatMessages, isSendingChatMessage]);
+  }, [activeTab, activeChatId, chatMessages, isSendingChatMessage]);
 
   async function handleGenerateProgram() {
     if (isGeneratingProgram) {
@@ -487,15 +568,27 @@ function DashboardPage() {
       return;
     }
 
+    const currentSession = activeChatSession ?? createChatSession();
     const userMessage: ChatMessage = {
       id: `${Date.now()}-user`,
       role: "user",
       text,
     };
-    const nextMessages = [...chatMessages, userMessage];
+    const nextMessages = [...currentSession.messages, userMessage];
+    const nextSession: ChatSession = {
+      ...currentSession,
+      title: getChatSessionTitle(nextMessages),
+      updatedAt: new Date().toISOString(),
+      messages: nextMessages,
+    };
+    const sessionsWithUserMessage = upsertChatSession(
+      chatSessions,
+      nextSession,
+    );
 
-    setChatMessages(nextMessages);
-    localStorage.setItem(chatStorageKey, JSON.stringify(nextMessages));
+    setChatSessions(sessionsWithUserMessage);
+    setActiveChatId(nextSession.id);
+    saveChatSessionsToStorage(sessionsWithUserMessage);
     setChatInput("");
     setMessage("");
 
@@ -504,7 +597,7 @@ function DashboardPage() {
       const response = await sendAiChatMessage(
         token,
         text,
-        chatMessages.slice(-8).map((item) => ({
+        currentSession.messages.slice(-8).map((item) => ({
           role: item.role,
           text: item.text,
         })),
@@ -515,9 +608,19 @@ function DashboardPage() {
         text: response.answer,
       };
       const finalMessages = [...nextMessages, aiMessage].slice(-20);
+      const finalSession: ChatSession = {
+        ...nextSession,
+        title: getChatSessionTitle(finalMessages),
+        updatedAt: new Date().toISOString(),
+        messages: finalMessages,
+      };
+      const finalSessions = upsertChatSession(
+        sessionsWithUserMessage,
+        finalSession,
+      );
 
-      setChatMessages(finalMessages);
-      localStorage.setItem(chatStorageKey, JSON.stringify(finalMessages));
+      setChatSessions(finalSessions);
+      saveChatSessionsToStorage(finalSessions);
       setMessage("");
     } catch (error) {
       console.error(error);
@@ -532,10 +635,31 @@ function DashboardPage() {
   }
 
   function handleClearChat() {
-    setChatMessages([]);
+    const currentSession = activeChatSession ?? createChatSession();
+    const clearedSession: ChatSession = {
+      ...currentSession,
+      title: "Новий чат",
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    };
+    const nextSessions = upsertChatSession(chatSessions, clearedSession);
+
+    setChatSessions(nextSessions);
+    setActiveChatId(clearedSession.id);
     setChatInput("");
-    localStorage.removeItem(chatStorageKey);
+    saveChatSessionsToStorage(nextSessions);
     setMessage("AI чат очищено");
+  }
+
+  function handleCreateChatSession() {
+    const nextSession = createChatSession();
+    const nextSessions = [nextSession, ...chatSessions];
+
+    setChatSessions(nextSessions);
+    setActiveChatId(nextSession.id);
+    setChatInput("");
+    saveChatSessionsToStorage(nextSessions);
+    setMessage("");
   }
 
   function getProgressReport(entries: ProgressEntry[]) {
@@ -1576,68 +1700,110 @@ function DashboardPage() {
                   </button>
                 </div>
 
-                <div
-                  ref={chatScrollRef}
-                  className="mt-6 h-[28rem] overflow-y-auto rounded-2xl border border-white/10 bg-slate-950/60 p-4 pr-3"
-                >
-                  {chatMessages.length ? (
-                    <div className="flex min-h-full flex-col justify-end space-y-3">
-                      {chatMessages.map((item) => (
-                        <div
-                          key={item.id}
-                          className={`flex ${
-                            item.role === "user"
-                              ? "justify-end"
-                              : "justify-start"
-                          }`}
-                        >
-                          <div
-                            className={`max-w-3xl rounded-2xl px-4 py-3 text-sm leading-6 ${
-                              item.role === "user"
-                                ? "bg-cyan-500 text-slate-950"
-                                : "border border-white/10 bg-white/5 text-slate-100"
+                <div className="mt-6 grid gap-4 lg:grid-cols-[17rem_1fr]">
+                  <aside className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                    <button
+                      type="button"
+                      onClick={handleCreateChatSession}
+                      className="w-full rounded-xl bg-cyan-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+                    >
+                      Новий чат
+                    </button>
+
+                    <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">
+                      {chatSessions.map((session) => {
+                        const isActive = session.id === activeChatSession?.id;
+
+                        return (
+                          <button
+                            key={session.id}
+                            type="button"
+                            onClick={() => setActiveChatId(session.id)}
+                            className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                              isActive
+                                ? "border-cyan-400/50 bg-cyan-400/10"
+                                : "border-white/10 bg-white/5 hover:bg-white/10"
                             }`}
                           >
-                            {item.text}
-                          </div>
-                        </div>
-                      ))}
-                      {isSendingChatMessage ? (
-                        <div className="flex justify-start">
-                          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
-                            AI думає...
-                          </div>
-                        </div>
-                      ) : null}
+                            <span className="block truncate text-sm font-semibold text-white">
+                              {session.title}
+                            </span>
+                            <span className="mt-1 block text-xs text-slate-400">
+                              {session.messages.length
+                                ? `${session.messages.length} повідомл.`
+                                : "Порожній чат"}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-center text-sm text-slate-400">
-                      Запитай AI про тренування, харчування або прогрес.
-                    </div>
-                  )}
-                </div>
+                  </aside>
 
-                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-                  <input
-                    type="text"
-                    value={chatInput}
-                    onChange={(event) => setChatInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        void handleSendChatMessage();
-                      }
-                    }}
-                    placeholder="Наприклад: що змінити, якщо вага стоїть?"
-                    className="min-h-12 flex-1 rounded-xl border border-white/10 bg-slate-950/70 px-4 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-400"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSendChatMessage}
-                    disabled={isSendingChatMessage || !chatInput.trim()}
-                    className="min-h-12 rounded-xl bg-cyan-500 px-5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isSendingChatMessage ? "AI думає..." : "Надіслати"}
-                  </button>
+                  <div>
+                    <div
+                      ref={chatScrollRef}
+                      className="h-[28rem] overflow-y-auto rounded-2xl border border-white/10 bg-slate-950/60 p-4 pr-3"
+                    >
+                      {chatMessages.length ? (
+                        <div className="flex min-h-full flex-col justify-end space-y-3">
+                          {chatMessages.map((item) => (
+                            <div
+                              key={item.id}
+                              className={`flex ${
+                                item.role === "user"
+                                  ? "justify-end"
+                                  : "justify-start"
+                              }`}
+                            >
+                              <div
+                                className={`max-w-3xl rounded-2xl px-4 py-3 text-sm leading-6 ${
+                                  item.role === "user"
+                                    ? "bg-cyan-500 text-slate-950"
+                                    : "border border-white/10 bg-white/5 text-slate-100"
+                                }`}
+                              >
+                                {item.text}
+                              </div>
+                            </div>
+                          ))}
+                          {isSendingChatMessage ? (
+                            <div className="flex justify-start">
+                              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+                                AI думає...
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-center text-sm text-slate-400">
+                          Запитай AI про тренування, харчування або прогрес.
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                      <input
+                        type="text"
+                        value={chatInput}
+                        onChange={(event) => setChatInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            void handleSendChatMessage();
+                          }
+                        }}
+                        placeholder="Наприклад: що змінити, якщо вага стоїть?"
+                        className="min-h-12 flex-1 rounded-xl border border-white/10 bg-slate-950/70 px-4 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-400"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSendChatMessage}
+                        disabled={isSendingChatMessage || !chatInput.trim()}
+                        className="min-h-12 rounded-xl bg-cyan-500 px-5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isSendingChatMessage ? "AI думає..." : "Надіслати"}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </section>
             ) : null}
