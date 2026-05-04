@@ -12,7 +12,9 @@ export async function getMyProfile(token: string) {
   });
 
   if (!response.ok) {
-    throw new Error("Помилка отримання профілю");
+    throw new Error(
+      await getProfileErrorMessage(response, "Помилка отримання профілю"),
+    );
   }
 
   return response.json();
@@ -63,6 +65,10 @@ export async function updateMyProfile(
 }
 
 async function getProfileErrorMessage(response: Response, fallback: string) {
+  if (response.status === 401) {
+    return "Сесія завершилась. Увійдіть ще раз.";
+  }
+
   try {
     const data = await response.json();
     if (typeof data?.message === "string") {

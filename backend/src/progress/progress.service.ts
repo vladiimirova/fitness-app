@@ -56,6 +56,14 @@ export class ProgressService {
     return this.toResponse(result[0]);
   }
 
+  async resetMyEntries(userId: number) {
+    await db
+      .delete(progressEntriesTable)
+      .where(eq(progressEntriesTable.userId, userId));
+
+    return { success: true };
+  }
+
   private toResponse(entry: typeof progressEntriesTable.$inferSelect) {
     return {
       id: String(entry.id),

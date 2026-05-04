@@ -4,6 +4,7 @@ import LoginPage from '../pages/LoginPage/LoginPage';
 import RegisterPage from '../pages/RegisterPage/RegisterPage';
 import DashboardPage from '../pages/DashboardPage/DashboardPage';
 import ProfilePage from '../pages/ProfilePage/ProfilePage';
+import HelpPage from '../pages/HelpPage/HelpPage';
 import ProtectedRoute from './ProtectedRoute';
 
 function AppRouter() {
@@ -26,6 +27,14 @@ function AppRouter() {
           element={
             <ProtectedRoute>
               <ProfilePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/help"
+          element={
+            <ProtectedRoute>
+              <HelpPage />
             </ProtectedRoute>
           }
         />

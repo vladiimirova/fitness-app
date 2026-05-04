@@ -24,17 +24,17 @@ function HeroSection() {
             результату.
           </p>
 
-          <div className="mt-8 flex flex-col gap-4 sm:flex-row">
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <Link
               to="/register"
-              className="rounded-2xl bg-gradient-to-r from-cyan-500 to-violet-500 px-6 py-3 text-center font-semibold text-white shadow-[0_0_25px_rgba(99,102,241,0.35)] transition hover:opacity-90"
+              className="inline-flex h-12 items-center justify-center rounded-xl border border-cyan-300/20 bg-gradient-to-r from-cyan-500 to-violet-500 px-6 text-center font-semibold text-white shadow-[0_0_18px_rgba(34,211,238,0.18)] transition hover:border-cyan-200/40 hover:shadow-[0_0_24px_rgba(34,211,238,0.24)]"
             >
               Спробувати зараз
             </Link>
 
             <a
               href="#features"
-              className="rounded-2xl border border-white/15 bg-white/5 px-6 py-3 text-center font-semibold text-white transition hover:bg-white/10"
+              className="inline-flex h-12 items-center justify-center rounded-xl border border-cyan-500/25 bg-slate-950/45 px-6 text-center font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-white"
             >
               Дізнатися більше
             </a>

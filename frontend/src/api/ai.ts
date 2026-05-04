@@ -88,5 +88,9 @@ export async function sendAiChatMessage(
     throw new Error(errorMessage);
   }
 
-  return response.json() as Promise<{ answer: string }>;
+  return response.json() as Promise<{
+    answer: string;
+    updatedProgram?: unknown;
+    programUpdated?: boolean;
+  }>;
 }

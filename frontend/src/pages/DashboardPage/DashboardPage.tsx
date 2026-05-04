@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FaBars, FaEllipsisH, FaTimes } from "react-icons/fa";
 import { Link, useNavigate } from "react-router-dom";
 import {
   generateMyAiProgram,
@@ -6,7 +7,12 @@ import {
   sendAiChatMessage,
 } from "../../api/ai";
 import { getMyProfile } from "../../api/profile";
-import { createProgressEntry, getMyProgressEntries } from "../../api/progress";
+import {
+  createProgressEntry,
+  getMyProgressEntries,
+  resetMyProgressEntries,
+} from "../../api/progress";
+import AppBrand from "../../components/common/AppBrand";
 import type { ProgressEntry, ProgressPayload } from "../../types";
 
 type ProfileData = {
@@ -178,6 +184,37 @@ function getChatSessionTitle(messages: ChatMessage[]) {
   return text.length > 34 ? `${text.slice(0, 34)}...` : text;
 }
 
+function formatChatUpdatedAt(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Дата невідома";
+  }
+
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+
+  const time = date.toLocaleTimeString("uk-UA", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  if (date.toDateString() === now.toDateString()) {
+    return `Сьогодні, ${time}`;
+  }
+
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `Вчора, ${time}`;
+  }
+
+  return date.toLocaleDateString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
 function saveChatSessionsToStorage(sessions: ChatSession[]) {
   localStorage.setItem(chatSessionsStorageKey, JSON.stringify(sessions));
 }
@@ -266,6 +303,7 @@ function DashboardPage() {
   const [activeWeek, setActiveWeek] = useState<number>(1);
   const [loading, setLoading] = useState<boolean>(true);
   const [message, setMessage] = useState<string>("");
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("training");
   const [activeNutritionWeek, setActiveNutritionWeek] = useState<number>(1);
   const [nutritionPlan, setNutritionPlan] = useState<NutritionWeekPlan[]>([]);
@@ -278,8 +316,16 @@ function DashboardPage() {
   const [progressEntries, setProgressEntries] = useState<ProgressEntry[]>([]);
   const [progressPeriod, setProgressPeriod] = useState<ProgressPeriod>("week");
   const [isSavingProgress, setIsSavingProgress] = useState<boolean>(false);
+  const [isResettingProgress, setIsResettingProgress] =
+    useState<boolean>(false);
+  const [isResetProgressDialogOpen, setIsResetProgressDialogOpen] =
+    useState<boolean>(false);
+  const [progressMessage, setProgressMessage] = useState<string>("");
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
+  const [openChatMenuId, setOpenChatMenuId] = useState<string | null>(null);
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [renameChatTitle, setRenameChatTitle] = useState<string>("");
   const [chatInput, setChatInput] = useState<string>("");
   const [isSendingChatMessage, setIsSendingChatMessage] =
     useState<boolean>(false);
@@ -366,7 +412,18 @@ function DashboardPage() {
           }
         } else {
           console.error(results[0].reason);
-          setMessage("Не вдалося завантажити профіль");
+          const errorMessage =
+            results[0].reason instanceof Error
+              ? results[0].reason.message
+              : "Не вдалося завантажити профіль";
+
+          setMessage(errorMessage);
+
+          if (errorMessage.includes("Сесія завершилась")) {
+            localStorage.removeItem("token");
+            navigate("/login", { replace: true });
+            return;
+          }
         }
 
         if (results[1].status === "fulfilled" && results[1].value) {
@@ -518,7 +575,7 @@ function DashboardPage() {
     );
 
     if (hasEntryForDate) {
-      setMessage("За цей день замір вже збережено");
+      setProgressMessage("За цей день замір вже збережено");
       return;
     }
 
@@ -545,16 +602,40 @@ function DashboardPage() {
 
       setProgressEntries(nextEntries);
       localStorage.setItem(progressStorageKey, JSON.stringify(nextEntries));
-      setMessage("Замір прогресу збережено");
+      setProgressMessage("Замір прогресу збережено");
     } catch (error) {
       console.error(error);
-      setMessage(
+      setProgressMessage(
         error instanceof Error
-          ? `Прогрес: ${error.message}`
+          ? error.message
           : "Не вдалося зберегти замір прогресу",
       );
     } finally {
       setIsSavingProgress(false);
+    }
+  }
+
+  async function handleResetProgressEntries() {
+    if (isResettingProgress || !progressEntries.length) {
+      return;
+    }
+
+    try {
+      setIsResettingProgress(true);
+      await resetMyProgressEntries(token);
+      setProgressEntries([]);
+      localStorage.removeItem(progressStorageKey);
+      setIsResetProgressDialogOpen(false);
+      setProgressMessage("Прогрес скинуто");
+    } catch (error) {
+      console.error(error);
+      setProgressMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося скинути прогрес",
+      );
+    } finally {
+      setIsResettingProgress(false);
     }
   }
 
@@ -599,6 +680,20 @@ function DashboardPage() {
           text: item.text,
         })),
       );
+      let didUpdateNutritionPlan = false;
+      if (response.programUpdated && response.updatedProgram) {
+        const applied = applyAiProgram(
+          response.updatedProgram as AiProgramResponse,
+        );
+
+        if (applied.hasNutrition) {
+          didUpdateNutritionPlan = true;
+          setActiveNutritionWeek(1);
+          setActiveTab("nutrition");
+          setMessage("План харчування оновлено за побажанням із чату");
+        }
+      }
+
       const aiMessage: ChatMessage = {
         id: `${Date.now()}-ai`,
         role: "ai",
@@ -618,7 +713,9 @@ function DashboardPage() {
 
       setChatSessions(finalSessions);
       saveChatSessionsToStorage(getPersistedChatSessions(finalSessions));
-      setMessage("");
+      if (!didUpdateNutritionPlan) {
+        setMessage("");
+      }
     } catch (error) {
       console.error(error);
       setMessage(
@@ -632,6 +729,8 @@ function DashboardPage() {
   }
 
   function handleClearChat() {
+    setOpenChatMenuId(null);
+
     if (!activeChatSession) {
       setChatInput("");
       setMessage("");
@@ -656,24 +755,37 @@ function DashboardPage() {
 
   function handleCreateChatSession() {
     setActiveChatId("");
+    setOpenChatMenuId(null);
     setChatInput("");
     setMessage("");
   }
 
   function handleRenameChatSession(sessionId: string) {
     const session = chatSessions.find((item) => item.id === sessionId);
-    const nextTitle = window.prompt(
-      "Нова назва чату",
-      session?.title ?? "Новий чат",
-    );
-    const normalizedTitle = nextTitle?.trim();
+
+    setOpenChatMenuId(null);
+    setRenamingChatId(sessionId);
+    setRenameChatTitle(session?.title ?? "Новий чат");
+  }
+
+  function handleCancelRenameChatSession() {
+    setRenamingChatId(null);
+    setRenameChatTitle("");
+  }
+
+  function handleSubmitRenameChatSession() {
+    if (!renamingChatId) {
+      return;
+    }
+
+    const normalizedTitle = renameChatTitle.trim();
 
     if (!normalizedTitle) {
       return;
     }
 
     const nextSessions = chatSessions.map((item) =>
-      item.id === sessionId
+      item.id === renamingChatId
         ? {
             ...item,
             title: normalizedTitle,
@@ -683,6 +795,9 @@ function DashboardPage() {
     );
 
     setChatSessions(nextSessions);
+    setRenamingChatId(null);
+    setRenameChatTitle("");
+    setOpenChatMenuId(null);
     saveChatSessionsToStorage(getPersistedChatSessions(nextSessions));
   }
 
@@ -690,6 +805,7 @@ function DashboardPage() {
     const nextSessions = chatSessions.filter((item) => item.id !== sessionId);
 
     setChatSessions(nextSessions);
+    setOpenChatMenuId(null);
     if (activeChatId === sessionId) {
       setActiveChatId("");
       setChatInput("");
@@ -937,59 +1053,150 @@ function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-6 text-white sm:px-6 lg:px-8">
-      <div className="mx-auto max-w-7xl">
-        <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm uppercase tracking-[0.25em] text-cyan-400/80">
-              Особистий кабінет
-            </p>
-            <h1 className="mt-2 text-3xl font-bold sm:text-4xl">
-              Панель керування
-            </h1>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <Link
-              to="/"
-              className="flex h-10 items-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
-            >
-              Головна
-            </Link>
+      <div className="mx-auto max-w-6xl">
+        <header className="sticky top-0 z-30 mb-8 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 shadow-[0_0_30px_rgba(59,130,246,0.08)] backdrop-blur-xl sm:px-6">
+          <div className="flex items-center justify-between gap-4 lg:hidden">
+            <AppBrand />
 
             <button
               type="button"
-              onClick={handleOpenProfile}
-              className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 transition hover:bg-white/10"
-              aria-label="Налаштування профілю"
-              title="Налаштування профілю"
+              onClick={() => setIsMenuOpen((prev) => !prev)}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-white/5 text-white transition hover:bg-white/10 lg:hidden"
+              aria-label={isMenuOpen ? "Закрити меню" : "Відкрити меню"}
+              aria-expanded={isMenuOpen}
+              aria-controls="dashboard-mobile-menu"
             >
-              {renderAvatar(
-                "flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-xs font-bold text-white",
+              {isMenuOpen ? (
+                <FaTimes aria-hidden="true" />
+              ) : (
+                <FaBars aria-hidden="true" />
               )}
+            </button>
+          </div>
 
-              <div className="text-left">
-                <p className="text-sm font-medium leading-none text-white">
-                  {profileData?.name || "Профіль"}
-                </p>
+          <div className="hidden items-center justify-between gap-8 lg:flex">
+            <AppBrand />
+
+            <div className="hidden items-center gap-3 lg:flex">
+              <Link
+                to="/"
+                className="flex h-10 items-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
+              >
+                Головна
+              </Link>
+
+              <Link
+                to="/help"
+                className="flex h-10 items-center rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-medium text-white transition hover:bg-white/10"
+              >
+                Допомога
+              </Link>
+
+              <button
+                type="button"
+                onClick={handleOpenProfile}
+                className="flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 transition hover:bg-white/10"
+                aria-label="Налаштування профілю"
+                title="Налаштування профілю"
+              >
+                {renderAvatar(
+                  "flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-xs font-bold text-white",
+                )}
+
+                <div className="text-left">
+                  <p className="text-sm font-medium leading-none text-white">
+                    {profileData?.name || "Профіль"}
+                  </p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex h-10 items-center rounded-xl bg-slate-700 px-4 text-sm font-medium text-white transition hover:bg-slate-600"
+              >
+                Вийти
+              </button>
+            </div>
+          </div>
+
+          <div
+            id="dashboard-mobile-menu"
+            className={`grid transition-[grid-template-rows,opacity] duration-200 lg:hidden ${
+              isMenuOpen
+                ? "grid-rows-[1fr] opacity-100"
+                : "grid-rows-[0fr] opacity-0"
+            }`}
+          >
+            <div className="overflow-hidden">
+              <div className="mt-4 flex flex-col gap-3 border-t border-white/10 pt-4 sm:flex-row">
+                <Link
+                  to="/"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="flex h-10 items-center justify-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
+                >
+                  Головна
+                </Link>
+
+                <Link
+                  to="/help"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="flex h-10 items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-medium text-white transition hover:bg-white/10"
+                >
+                  Допомога
+                </Link>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    handleOpenProfile();
+                  }}
+                  className="flex h-10 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 transition hover:bg-white/10"
+                  aria-label="Налаштування профілю"
+                  title="Налаштування профілю"
+                >
+                  {renderAvatar(
+                    "flex h-7 w-7 items-center justify-center overflow-hidden rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 text-xs font-bold text-white",
+                  )}
+
+                  <span className="text-sm font-medium leading-none text-white">
+                    {profileData?.name || "Профіль"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    handleLogout();
+                  }}
+                  className="flex h-10 items-center justify-center rounded-xl bg-slate-700 px-4 text-sm font-medium text-white transition hover:bg-slate-600"
+                >
+                  Вийти
+                </button>
               </div>
-            </button>
-
-            <button
-              onClick={handleLogout}
-              className="flex h-10 items-center rounded-xl bg-slate-700 px-4 text-sm font-medium text-white transition hover:bg-slate-600"
-            >
-              Вийти
-            </button>
+            </div>
           </div>
         </header>
 
-        <div className="mb-6 min-h-14">
+        <section className="mb-3">
+          <p className="text-sm uppercase tracking-[0.25em] text-cyan-400/80">
+            Особистий кабінет
+          </p>
+          <h1 className="mt-2 text-3xl font-bold sm:text-4xl">
+            Панель керування
+          </h1>
+        </section>
+
+        <div className="mb-2 min-h-8">
           <div
-            className={`rounded-2xl border px-4 py-3 text-sm transition ${
+            className={`rounded-lg border px-4 py-1.5 text-sm transition ${
               message
                 ? "border-violet-500/20 bg-violet-500/10 text-violet-100 opacity-100"
                 : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
             }`}
+            role="status"
             aria-live="polite"
           >
             {message}
@@ -1004,7 +1211,7 @@ function DashboardPage() {
           <>
             <section className="mb-8 rounded-[28px] border border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.14),_transparent_30%),radial-gradient(circle_at_top_right,_rgba(139,92,246,0.16),_transparent_30%),rgba(255,255,255,0.04)] p-6 shadow-[0_0_35px_rgba(34,211,238,0.06)] backdrop-blur sm:p-8">
               <div className="grid gap-6 lg:grid-cols-[1.2fr_0.9fr]">
-                <div>
+                <div className="flex flex-col justify-center">
                   <p className="mb-3 text-sm text-slate-300">
                     Привіт,{" "}
                     <span className="font-semibold text-white">
@@ -1660,6 +1867,20 @@ function DashboardPage() {
                             ? "Замір за день вже є"
                             : "Зберегти замір"}
                       </button>
+
+                      <div className="mt-3 min-h-8">
+                        <div
+                          className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                            progressMessage
+                              ? "border-cyan-500/20 bg-cyan-500/10 text-cyan-100 opacity-100"
+                              : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
+                          }`}
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {progressMessage}
+                        </div>
+                      </div>
                     </div>
 
                     <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-5">
@@ -1668,9 +1889,24 @@ function DashboardPage() {
                           <h4 className="text-lg font-semibold text-white">
                             Графік прогресу
                           </h4>
-                          <span className="mt-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
-                            {visibleProgressEntries.length} замірів
-                          </span>
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <span className="inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
+                              {visibleProgressEntries.length} замірів
+                            </span>
+
+                            <button
+                              type="button"
+                              onClick={() => setIsResetProgressDialogOpen(true)}
+                              disabled={
+                                isResettingProgress || !progressEntries.length
+                              }
+                              className="rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isResettingProgress
+                                ? "Скидання..."
+                                : "Скинути прогрес"}
+                            </button>
+                          </div>
                         </div>
 
                         <div className="flex rounded-xl border border-white/10 bg-slate-900 p-1">
@@ -1745,7 +1981,13 @@ function DashboardPage() {
                       Новий чат
                     </button>
 
-                    <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">
+                    <div
+                      className={`mt-3 space-y-2 ${
+                        chatSessions.length > 5
+                          ? "max-h-[31rem] overflow-y-auto pr-1"
+                          : "overflow-visible"
+                      }`}
+                    >
                       {chatSessions.length ? (
                         chatSessions.map((session) => {
                           const isActive = session.id === activeChatId;
@@ -1753,45 +1995,66 @@ function DashboardPage() {
                           return (
                             <div
                               key={session.id}
-                              className={`rounded-xl border p-2 transition ${
+                              className={`relative rounded-xl border p-2 transition ${
                               isActive
                                 ? "border-cyan-400/50 bg-cyan-400/10"
                                 : "border-white/10 bg-white/5 hover:bg-white/10"
                               }`}
                             >
-                              <button
-                                type="button"
-                                onClick={() => setActiveChatId(session.id)}
-                                className="w-full text-left"
-                              >
-                                <span className="block truncate text-sm font-semibold text-white">
-                                  {session.title}
-                                </span>
-                                <span className="mt-1 block text-xs text-slate-400">
-                                  {`${session.messages.length} повідомл.`}
-                                </span>
-                              </button>
-
-                              <div className="mt-3 flex gap-2">
+                              <div className="flex items-start gap-2">
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    handleRenameChatSession(session.id)
-                                  }
-                                  className="flex-1 rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+                                  onClick={() => {
+                                    setActiveChatId(session.id);
+                                    setOpenChatMenuId(null);
+                                  }}
+                                  className="min-w-0 flex-1 text-left"
                                 >
-                                  Назва
+                                  <span className="block truncate text-sm font-semibold text-white">
+                                    {session.title}
+                                  </span>
+                                  <span className="mt-1 block text-xs text-slate-400">
+                                    {formatChatUpdatedAt(session.updatedAt)}
+                                  </span>
                                 </button>
+
                                 <button
                                   type="button"
                                   onClick={() =>
-                                    handleDeleteChatSession(session.id)
+                                    setOpenChatMenuId((current) =>
+                                      current === session.id ? null : session.id,
+                                    )
                                   }
-                                  className="flex-1 rounded-lg border border-rose-400/20 bg-rose-400/10 px-2 py-1.5 text-xs font-medium text-rose-200 transition hover:bg-rose-400/20"
+                                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-white"
+                                  aria-label="Дії чату"
+                                  aria-expanded={openChatMenuId === session.id}
                                 >
-                                  Видалити
+                                  <FaEllipsisH aria-hidden="true" />
                                 </button>
                               </div>
+
+                              {openChatMenuId === session.id ? (
+                                <div className="absolute right-2 top-11 z-20 w-40 rounded-xl border border-white/10 bg-slate-900 p-1.5 shadow-2xl shadow-black/40">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleRenameChatSession(session.id)
+                                    }
+                                    className="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-200 transition hover:bg-white/10 hover:text-white"
+                                  >
+                                    Перейменувати
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteChatSession(session.id)
+                                    }
+                                    className="w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-200 transition hover:bg-rose-400/10 hover:text-rose-100"
+                                  >
+                                    Видалити
+                                  </button>
+                                </div>
+                              ) : null}
                             </div>
                           );
                         })
@@ -1870,6 +2133,136 @@ function DashboardPage() {
                   </div>
                 </div>
               </section>
+            ) : null}
+
+            {renamingChatId ? (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="rename-chat-title"
+              >
+                <div className="w-full max-w-md rounded-2xl border border-white/10 bg-slate-900 p-5 shadow-2xl shadow-black/40">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-cyan-400/80">
+                        AI чат
+                      </p>
+                      <h3
+                        id="rename-chat-title"
+                        className="mt-1 text-xl font-semibold text-white"
+                      >
+                        Перейменувати чат
+                      </h3>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleCancelRenameChatSession}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white"
+                      aria-label="Закрити"
+                    >
+                      <FaTimes aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <label className="mt-5 block">
+                    <span className="text-sm text-slate-300">Назва чату</span>
+                    <input
+                      value={renameChatTitle}
+                      onChange={(event) =>
+                        setRenameChatTitle(event.target.value)
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          handleSubmitRenameChatSession();
+                        }
+
+                        if (event.key === "Escape") {
+                          handleCancelRenameChatSession();
+                        }
+                      }}
+                      autoFocus
+                      className="mt-2 h-12 w-full rounded-xl border border-white/10 bg-slate-950 px-4 text-sm text-white outline-none transition focus:border-cyan-400"
+                    />
+                  </label>
+
+                  <div className="mt-5 flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={handleCancelRenameChatSession}
+                      className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+                    >
+                      Скасувати
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSubmitRenameChatSession}
+                      disabled={!renameChatTitle.trim()}
+                      className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Зберегти
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {isResetProgressDialogOpen ? (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="reset-progress-title"
+              >
+                <div className="w-full max-w-md rounded-2xl border border-rose-400/20 bg-slate-900 p-5 shadow-2xl shadow-black/40">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-rose-300">
+                        Прогрес
+                      </p>
+                      <h3
+                        id="reset-progress-title"
+                        className="mt-1 text-xl font-semibold text-white"
+                      >
+                        Скинути всі заміри?
+                      </h3>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsResetProgressDialogOpen(false)}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white"
+                      aria-label="Закрити"
+                    >
+                      <FaTimes aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <p className="mt-4 text-sm leading-6 text-slate-300">
+                    Усі збережені записи прогресу буде видалено. Це очистить
+                    графік, звіт і локальний кеш прогресу.
+                  </p>
+
+                  <div className="mt-5 flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setIsResetProgressDialogOpen(false)}
+                      className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+                    >
+                      Скасувати
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetProgressEntries}
+                      disabled={isResettingProgress}
+                      className="rounded-xl bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isResettingProgress ? "Скидання..." : "Скинути"}
+                    </button>
+                  </div>
+                </div>
+              </div>
             ) : null}
           </>
         )}
@@ -1979,10 +2372,11 @@ function buildNutritionPlanFromAiProgram(
       .map((meal) => {
         const mealType = normalizeMealType(meal.mealType);
         const ingredients = (meal.foods ?? []).map((food) => ({
-          name:
+          name: formatFoodName(
             food.name ??
-            (food.foodId ? foodLookup.get(food.foodId) : undefined) ??
-            "Інгредієнт",
+              (food.foodId ? foodLookup.get(food.foodId) : undefined) ??
+              "Інгредієнт",
+          ),
           grams: Math.max(1, Math.round(food.grams)),
           calories: Math.max(0, Math.round(Number(food.calories) || 0)),
         }));
@@ -2051,6 +2445,25 @@ function looksLikeIngredientList(value: string) {
     ";",
   ];
   return forbiddenTokens.some((token) => normalized.includes(token));
+}
+
+function formatFoodName(value: string) {
+  const trimmed = value.trim().replace(/\s+/g, " ");
+
+  if (!trimmed) {
+    return "Інгредієнт";
+  }
+
+  return trimmed
+    .split(" ")
+    .map((part) => {
+      if (!part) {
+        return part;
+      }
+
+      return `${part[0].toLocaleUpperCase("uk-UA")}${part.slice(1)}`;
+    })
+    .join(" ");
 }
 
 function normalizeMealType(value: string | undefined) {

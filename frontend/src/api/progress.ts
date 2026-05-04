@@ -40,6 +40,19 @@ export async function createProgressEntry(
   return response.json();
 }
 
+export async function resetMyProgressEntries(token: string): Promise<void> {
+  const response = await fetch(`${API_URL}/progress/me`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(await getProgressErrorMessage(response));
+  }
+}
+
 async function getProgressErrorMessage(response: Response) {
   try {
     const data = await response.json();

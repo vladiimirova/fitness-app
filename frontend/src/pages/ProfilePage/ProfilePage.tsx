@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
+import { FaBars, FaTimes } from "react-icons/fa";
 import { Link, useNavigate } from "react-router-dom";
 import {
   createProfile,
   getMyProfile,
   updateMyProfile,
 } from "../../api/profile";
+import AppBrand from "../../components/common/AppBrand";
 import type { ProfileFormData, ProfilePayload, UserProfile } from "../../types";
 
 const defaultForm: ProfileFormData = {
@@ -30,6 +32,7 @@ function ProfilePage() {
   const [form, setForm] = useState<ProfileFormData>(defaultForm);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [avatar, setAvatar] = useState<string>("");
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -74,7 +77,17 @@ function ProfilePage() {
         }
       } catch (error) {
         console.error(error);
-        setMessage("Не вдалося завантажити профіль");
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "Не вдалося завантажити профіль";
+
+        setMessage(errorMessage);
+
+        if (errorMessage.includes("Сесія завершилась")) {
+          localStorage.removeItem("token");
+          navigate("/login", { replace: true });
+        }
       } finally {
         setLoading(false);
       }
@@ -183,31 +196,76 @@ function ProfilePage() {
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-6 text-white sm:px-6 lg:px-8">
       <div className="mx-auto max-w-5xl">
-        <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm uppercase tracking-[0.25em] text-cyan-400/80">
-              Налаштування
-            </p>
-            <h1 className="mt-2 text-3xl font-bold sm:text-4xl">
-              Профіль користувача
-            </h1>
+        <header className="sticky top-0 z-30 mb-8 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 shadow-[0_0_30px_rgba(59,130,246,0.08)] backdrop-blur-xl sm:px-6">
+          <div className="flex items-center justify-between gap-4 lg:hidden">
+            <AppBrand />
+
+            <button
+              type="button"
+              onClick={() => setIsMenuOpen((prev) => !prev)}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-white/5 text-white transition hover:bg-white/10 lg:hidden"
+              aria-label={isMenuOpen ? "Закрити меню" : "Відкрити меню"}
+              aria-expanded={isMenuOpen}
+              aria-controls="profile-mobile-menu"
+            >
+              {isMenuOpen ? (
+                <FaTimes aria-hidden="true" />
+              ) : (
+                <FaBars aria-hidden="true" />
+              )}
+            </button>
           </div>
 
-          <Link
-            to="/dashboard"
-            className="w-fit rounded-xl border border-cyan-500/30 bg-slate-900 px-4 py-2 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
+          <div className="hidden items-center justify-between gap-8 lg:flex">
+            <AppBrand />
+
+            <Link
+              to="/dashboard"
+              className="hidden h-10 items-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800 lg:flex"
+            >
+              До особистого кабінету
+            </Link>
+          </div>
+
+          <div
+            id="profile-mobile-menu"
+            className={`grid transition-[grid-template-rows,opacity] duration-200 lg:hidden ${
+              isMenuOpen
+                ? "grid-rows-[1fr] opacity-100"
+                : "grid-rows-[0fr] opacity-0"
+            }`}
           >
-            До особистого кабінету
-          </Link>
+            <div className="overflow-hidden">
+              <div className="mt-4 border-t border-white/10 pt-4">
+                <Link
+                  to="/dashboard"
+                  onClick={() => setIsMenuOpen(false)}
+                  className="flex h-10 items-center justify-center rounded-xl border border-cyan-500/30 bg-slate-900 px-4 text-sm font-medium text-cyan-300 transition hover:border-cyan-400 hover:bg-slate-800"
+                >
+                  До особистого кабінету
+                </Link>
+              </div>
+            </div>
+          </div>
         </header>
 
-        <div className="mb-6 min-h-14">
+        <section className="mb-3">
+          <p className="text-sm uppercase tracking-[0.25em] text-cyan-400/80">
+            Налаштування
+          </p>
+          <h1 className="mt-2 text-3xl font-bold sm:text-4xl">
+            Профіль користувача
+          </h1>
+        </section>
+
+        <div className="mb-2 min-h-8">
           <div
-            className={`rounded-2xl border px-4 py-3 text-sm transition ${
+            className={`rounded-lg border px-4 py-1.5 text-sm transition ${
               message
                 ? "border-cyan-500/20 bg-cyan-500/10 text-cyan-100 opacity-100"
                 : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
             }`}
+            role="status"
             aria-live="polite"
           >
             {message}

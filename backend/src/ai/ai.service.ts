@@ -58,6 +58,8 @@ type AiProgramResponse = {
     hybridModel?: HybridRecommendationModel;
     savedProgramId?: number;
     savedAt?: Date;
+    chatNutritionUpdatedAt?: Date;
+    chatNutritionPreference?: string;
   };
   program: unknown;
 };
@@ -163,6 +165,7 @@ ${question}
 - Не вигадуй медичних діагнозів.
 - Якщо питання про біль, травму, ліки або хворобу, порадь звернутися до лікаря.
 - Якщо користувач пише коротко або сумнівається, відповідай прямо по суті його останньої репліки.
+- Не обіцяй, що план уже оновлено або збережено. Система сама додасть це повідомлення після реального збереження.
 - Відповідай 2-5 реченнями, без markdown-таблиць.
 `;
 
@@ -171,6 +174,20 @@ ${question}
       maxOutputTokens: 450,
       responseMimeType: 'text/plain',
     });
+
+    const updatedProgram = await this.tryApplyNutritionPreferenceFromChatSafely(
+      userId,
+      profile,
+      question,
+    );
+
+    if (updatedProgram) {
+      return {
+        answer: `${answer}\n\nЯ оновив план харчування з урахуванням цього побажання.`,
+        updatedProgram,
+        programUpdated: true,
+      };
+    }
 
     return { answer };
   }
@@ -337,6 +354,964 @@ ${question}
     };
   }
 
+  private async tryApplyNutritionPreferenceFromChatSafely(
+    userId: number,
+    profile: AiProfile,
+    preference: string,
+  ) {
+    try {
+      return await this.tryApplyNutritionPreferenceFromChat(
+        userId,
+        profile,
+        preference,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Не вдалося оновити харчування з AI-чату: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+
+      return null;
+    }
+  }
+
+  private async tryApplyNutritionPreferenceFromChat(
+    userId: number,
+    profile: AiProfile,
+    preference: string,
+  ) {
+    if (!this.isNutritionPreferenceMessage(preference)) {
+      return null;
+    }
+
+    const programs = await db
+      .select()
+      .from(aiProgramsTable)
+      .where(eq(aiProgramsTable.userId, userId))
+      .orderBy(desc(aiProgramsTable.createdAt))
+      .limit(1);
+    const latest = programs[0];
+
+    if (!latest) {
+      return null;
+    }
+
+    const currentProgram = this.withSavedProgramMeta(
+      latest.payload,
+      latest.id,
+      latest.createdAt,
+    ) as AiProgramResponse;
+    const currentNutrition = (
+      currentProgram.program as {
+        nutritionPlan?: { days?: unknown[] };
+      }
+    )?.nutritionPlan;
+
+    if (!currentNutrition?.days?.length) {
+      return null;
+    }
+
+    const previousPreference =
+      typeof currentProgram.source?.chatNutritionPreference === 'string'
+        ? currentProgram.source.chatNutritionPreference
+        : '';
+    const preferenceContext = [previousPreference, preference]
+      .filter(Boolean)
+      .join('\n');
+    const updatedNutrition = await this.rewriteNutritionPlanForPreference(
+      profile,
+      currentNutrition,
+      preferenceContext,
+    );
+    const updatedProgram: AiProgramResponse = {
+      ...currentProgram,
+      source: {
+        ...currentProgram.source,
+        chatNutritionUpdatedAt: new Date(),
+        chatNutritionPreference: preferenceContext.slice(-600),
+      },
+      program: {
+        ...(currentProgram.program as Record<string, unknown>),
+        nutritionPlan: updatedNutrition,
+      },
+    };
+
+    await db
+      .update(aiProgramsTable)
+      .set({ payload: updatedProgram })
+      .where(eq(aiProgramsTable.id, latest.id));
+
+    return updatedProgram;
+  }
+
+  private isNutritionPreferenceMessage(message: string) {
+    const normalized = message.toLowerCase();
+    const nutritionKeywords = [
+      'їжа',
+      'їжу',
+      'харч',
+      'рецепт',
+      'страва',
+      'страв',
+      'меню',
+      'снідан',
+      'обід',
+      'вечер',
+      'перекус',
+      'калор',
+      'білок',
+      'вуглевод',
+      'жир',
+      'мʼяс',
+      "м'яс",
+      'риба',
+      'курк',
+      'греч',
+      'рис',
+      'овоч',
+      'молоч',
+      'сир',
+      'яйц',
+      'еда',
+      'питан',
+      'рецепт',
+      'блюд',
+      'меню',
+      'завтрак',
+      'обед',
+      'ужин',
+      'перекус',
+      'калор',
+      'белок',
+      'углевод',
+      'жир',
+      'мяс',
+      'рыб',
+      'куриц',
+      'греч',
+      'рис',
+      'овощ',
+      'молоч',
+      'творог',
+      'яйц',
+      'орех',
+      'оріх',
+      'горіх',
+      'горех',
+      'мигдаль',
+      'миндаль',
+      'замени',
+      'заменить',
+      'замена',
+      'замен',
+      'замін',
+      'заміни',
+      'замінити',
+      'заміна',
+      'поменя',
+      'поміня',
+      'вместо',
+      'замість',
+      'не люблю',
+      'не нравится',
+      'не подоба',
+      'не хочу',
+      'не їм',
+      'не ем',
+      'убери',
+      'прибери',
+      'исключи',
+      'виключи',
+      'аллерг',
+      'алерг',
+      'предпоч',
+      'переваг',
+    ];
+
+    return nutritionKeywords.some((keyword) => normalized.includes(keyword));
+  }
+
+  private async rewriteNutritionPlanForPreference(
+    profile: AiProfile,
+    currentNutrition: { days?: unknown[] },
+    preference: string,
+  ) {
+    const currentSummary =
+      this.buildNutritionPlanSummaryForPrompt(currentNutrition);
+    const response = await this.generateTextStep(
+      'AI оновлення харчування з чату',
+      `
+Підбери точкові заміни у nutritionPlan для користувача на основі нового побажання.
+
+Профіль:
+- Вага: ${profile.weight} кг
+- Бажана вага: ${this.formatTargetWeight(profile)}
+- Зріст: ${profile.height} см
+- Ціль: ${profile.goal}
+- Активність: ${profile.activityLevel}
+
+Побажання користувача:
+${preference}
+
+Поточний план, коротко:
+${currentSummary}
+
+Правила:
+- Поверни тільки короткий JSON без markdown.
+- Не повертай весь nutritionPlan.
+- Формат: {"foodReplacements":[{"from":"шпинат","to":"свинина"}],"mealPatches":[{"dayNumber":1,"mealIndex":0,"mealType":"breakfast","dishName":"...","foods":[{"name":"...","grams":100,"calories":120}]}],"preferenceNote":"..."}
+- Якщо користувач будь-якою мовою чи формулюванням просить замінити, прибрати, виключити, не їсти, не любить або має алергію на продукт, обов'язково заповни foodReplacements.
+- foodReplacements.from має бути саме продукт/інгредієнт з поточного плану, який треба прибрати.
+- foodReplacements.to має бути безпечною і логічною заміною. Якщо користувач не вказав заміну, підбери її сам.
+- mealPatches має містити 3-8 точкових замін, які можна повторити в плані.
+- dayNumber від 1 до 28, mealIndex від 0 до 3.
+- Кожен foods item має name, grams, calories.
+- Збережи приблизну калорійність прийому їжі і логіку цілі.
+`,
+      {
+        temperature: 0.25,
+        maxOutputTokens: 3500,
+        responseMimeType: 'application/json',
+      },
+    );
+    const parsed = (await this.parseOrRepairJson(response)) as {
+      foodReplacements?: unknown[];
+      mealPatches?: unknown[];
+      preferenceNote?: unknown;
+    };
+    const patchedNutritionPlan = this.applyNutritionMealPatches(
+      currentNutrition,
+      parsed?.mealPatches,
+      typeof parsed?.preferenceNote === 'string'
+        ? parsed.preferenceNote
+        : preference,
+    );
+    const replacedNutritionPlan = this.applyExplicitFoodReplacements(
+      patchedNutritionPlan,
+      preference,
+      parsed?.foodReplacements,
+    );
+    const nutritionPlan = this.enforceNutritionPreferenceAcrossPlan(
+      replacedNutritionPlan,
+      preference,
+    );
+
+    if (!this.hasExpectedNutritionPlanShape(nutritionPlan)) {
+      throw new BadRequestException(
+        'AI не зміг оновити план харчування. Спробуйте сформулювати побажання конкретніше.',
+      );
+    }
+
+    return nutritionPlan;
+  }
+
+  private buildNutritionPlanSummaryForPrompt(nutritionPlan: {
+    days?: unknown[];
+  }) {
+    const days = Array.isArray(nutritionPlan.days) ? nutritionPlan.days : [];
+
+    return days
+      .map((day) => {
+        const dayCandidate = day as { dayNumber?: unknown; meals?: unknown[] };
+        const meals = Array.isArray(dayCandidate.meals)
+          ? dayCandidate.meals
+          : [];
+        const mealSummary = meals
+          .map((meal, mealIndex) => {
+            const mealCandidate = meal as {
+              dishName?: unknown;
+              mealType?: unknown;
+              foods?: unknown[];
+            };
+            const foods = Array.isArray(mealCandidate.foods)
+              ? mealCandidate.foods
+                  .map((food) => (food as { name?: unknown }).name)
+                  .filter((name): name is string => typeof name === 'string')
+                  .slice(0, 5)
+                  .join(', ')
+              : '';
+
+            const dishName =
+              typeof mealCandidate.dishName === 'string' &&
+              mealCandidate.dishName.trim()
+                ? mealCandidate.dishName
+                : foods || 'без назви';
+
+            return `${mealIndex}:${String(
+              mealCandidate.mealType ?? 'meal',
+            )}:${dishName}`;
+          })
+          .join(' | ');
+
+        return `День ${Number(dayCandidate.dayNumber) || 0}: ${mealSummary}`;
+      })
+      .join('\n');
+  }
+
+  private applyNutritionMealPatches(
+    currentNutrition: { days?: unknown[] },
+    patches: unknown,
+    preferenceNote: string,
+  ) {
+    if (!Array.isArray(currentNutrition.days)) {
+      return currentNutrition;
+    }
+
+    const nutritionPlan = JSON.parse(
+      JSON.stringify(currentNutrition),
+    ) as Record<string, unknown> & { days: unknown[] };
+    const validPatches = Array.isArray(patches)
+      ? patches
+          .map((patch) => this.normalizeNutritionMealPatch(patch))
+          .filter((patch): patch is NonNullable<typeof patch> => Boolean(patch))
+      : [];
+
+    if (!validPatches.length) {
+      return {
+        ...nutritionPlan,
+        chatPreferenceNote: preferenceNote.slice(0, 300),
+      };
+    }
+
+    validPatches.forEach((patch) => {
+      const day = nutritionPlan.days.find((candidate) => {
+        return (
+          Number((candidate as { dayNumber?: unknown }).dayNumber) ===
+          patch.dayNumber
+        );
+      }) as { meals?: unknown[] } | undefined;
+
+      if (!day || !Array.isArray(day.meals)) {
+        return;
+      }
+
+      const fallbackIndex = day.meals.findIndex((meal) => {
+        return (
+          String((meal as { mealType?: unknown }).mealType ?? '') ===
+          patch.mealType
+        );
+      });
+      const mealIndex =
+        patch.mealIndex >= 0 && patch.mealIndex < day.meals.length
+          ? patch.mealIndex
+          : fallbackIndex;
+
+      if (mealIndex < 0 || mealIndex >= day.meals.length) {
+        return;
+      }
+
+      day.meals[mealIndex] = {
+        ...(day.meals[mealIndex] as Record<string, unknown>),
+        mealType:
+          patch.mealType ||
+          (day.meals[mealIndex] as { mealType?: unknown }).mealType,
+        dishName: patch.dishName,
+        foods: patch.foods,
+      };
+    });
+
+    return {
+      ...nutritionPlan,
+      chatPreferenceNote: preferenceNote.slice(0, 300),
+    };
+  }
+
+  private enforceNutritionPreferenceAcrossPlan(
+    currentNutrition: { days?: unknown[] },
+    preference: string,
+  ) {
+    if (!Array.isArray(currentNutrition.days)) {
+      return currentNutrition;
+    }
+
+    const forbiddenTerms = this.getForbiddenNutritionTerms(preference);
+
+    if (!forbiddenTerms.length) {
+      return currentNutrition;
+    }
+
+    const nutritionPlan = JSON.parse(
+      JSON.stringify(currentNutrition),
+    ) as Record<string, unknown> & { days: unknown[] };
+
+    nutritionPlan.days.forEach((day) => {
+      const meals = (day as { meals?: unknown[] }).meals;
+
+      if (!Array.isArray(meals)) {
+        return;
+      }
+
+      meals.forEach((meal) => {
+        if (!meal || typeof meal !== 'object') {
+          return;
+        }
+
+        const candidate = meal as {
+          dishName?: unknown;
+          foods?: Array<{ name?: unknown; grams?: unknown; calories?: unknown }>;
+          mealType?: unknown;
+        };
+        const foods = Array.isArray(candidate.foods) ? candidate.foods : [];
+        const removedCalories = foods.reduce((total, food) => {
+          const name = typeof food.name === 'string' ? food.name : '';
+
+          return this.containsForbiddenTerm(name, forbiddenTerms)
+            ? total + Math.max(0, Number(food.calories) || 0)
+            : total;
+        }, 0);
+        const safeFoods = foods.filter((food) => {
+          const name = typeof food.name === 'string' ? food.name : '';
+
+          return !this.containsForbiddenTerm(name, forbiddenTerms);
+        });
+
+        if (safeFoods.length !== foods.length) {
+          const replacement = this.getSafeFoodReplacement(
+            String(candidate.mealType ?? ''),
+            removedCalories,
+          );
+          candidate.foods = [...safeFoods, replacement];
+        }
+
+        if (!candidate.foods?.length) {
+          candidate.foods = [
+            this.getSafeFoodReplacement(String(candidate.mealType ?? ''), 250),
+          ];
+        }
+
+        if (
+          typeof candidate.dishName === 'string' &&
+          this.containsForbiddenTerm(candidate.dishName, forbiddenTerms)
+        ) {
+          candidate.dishName = this.getSafeDishName(
+            String(candidate.mealType ?? ''),
+          );
+        }
+      });
+    });
+
+    return {
+      ...nutritionPlan,
+      chatPreferenceNote: preference.slice(0, 300),
+      forbiddenIngredientsApplied: forbiddenTerms,
+    };
+  }
+
+  private applyExplicitFoodReplacements(
+    currentNutrition: { days?: unknown[] },
+    preference: string,
+    aiReplacements?: unknown,
+  ) {
+    if (!Array.isArray(currentNutrition.days)) {
+      return currentNutrition;
+    }
+
+    const replacements = this.mergeFoodReplacementRules([
+      ...this.extractFoodReplacementRules(preference),
+      ...this.normalizeAiFoodReplacements(aiReplacements),
+    ]);
+
+    if (!replacements.length) {
+      return currentNutrition;
+    }
+
+    const nutritionPlan = JSON.parse(
+      JSON.stringify(currentNutrition),
+    ) as Record<string, unknown> & { days: unknown[] };
+    let changedCount = 0;
+
+    nutritionPlan.days.forEach((day) => {
+      const meals = (day as { meals?: unknown[] }).meals;
+
+      if (!Array.isArray(meals)) {
+        return;
+      }
+
+      meals.forEach((meal) => {
+        if (!meal || typeof meal !== 'object') {
+          return;
+        }
+
+        const candidate = meal as {
+          dishName?: unknown;
+          foods?: Array<{ name?: unknown; grams?: unknown; calories?: unknown }>;
+        };
+
+        if (typeof candidate.dishName === 'string') {
+          replacements.forEach((replacement) => {
+            if (this.matchesFoodTerm(candidate.dishName as string, replacement.from)) {
+              candidate.dishName = this.replaceFoodTermInText(
+                candidate.dishName as string,
+                replacement,
+              );
+            }
+          });
+        }
+
+        if (!Array.isArray(candidate.foods)) {
+          return;
+        }
+
+        candidate.foods = candidate.foods.map((food) => {
+          const name = typeof food.name === 'string' ? food.name : '';
+          const replacement = replacements.find((item) =>
+            this.matchesFoodTerm(name, item.from),
+          );
+
+          if (!replacement) {
+            return food;
+          }
+
+          changedCount += 1;
+
+          return {
+            ...food,
+            name: this.toFoodDisplayName(replacement.to),
+          };
+        });
+      });
+    });
+
+    return {
+      ...nutritionPlan,
+      chatPreferenceNote: preference.slice(0, 300),
+      explicitFoodReplacementsApplied: replacements,
+      explicitFoodReplacementsCount: changedCount,
+    };
+  }
+
+  private extractFoodReplacementRules(preference: string) {
+    const lines = preference
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const patterns = [
+      /(?:замени|заменить|поменяй|поменять|заміни|замінити|поміняй|поміняти)\s+(.+?)\s+(?:на|на\s+|\-\>|→)\s+(.+)/i,
+      /(?:добавь|добавить|додай|додати|хочу|поставь|постав|зроби|сделай)\s+(.+?)\s+(?:вместо|замість)\s+(.+)/i,
+      /(?:вместо|замість)\s+(.+?)\s+(?:добавь|додай|поставь|постав|хочу|нужно|треба)?\s*(.+)/i,
+      /(.+?)\s+(?:замени|заменить|поменяй|поменять|заміни|замінити)\s+(?:на)\s+(.+)/i,
+    ];
+    const rules = lines.flatMap((line) => {
+      return patterns.flatMap((pattern, patternIndex) => {
+        const match = line.match(pattern);
+
+        if (!match?.[1] || !match?.[2]) {
+          return [];
+        }
+
+        const isReversedInsteadPattern = patternIndex === 1;
+        const fromItems = this.splitFoodTerms(
+          isReversedInsteadPattern ? match[2] : match[1],
+        );
+        const to = this.cleanFoodTerm(
+          isReversedInsteadPattern ? match[1] : match[2],
+        );
+
+        if (!to) {
+          return [];
+        }
+
+        return fromItems.map((from) => ({ from, to })).filter((rule) => {
+          return rule.from && rule.to && rule.from !== rule.to;
+        });
+      });
+    });
+    const unique = new Map<string, { from: string; to: string }>();
+
+    rules.forEach((rule) => {
+      unique.set(`${rule.from}->${rule.to}`, rule);
+    });
+
+    return Array.from(unique.values());
+  }
+
+  private normalizeAiFoodReplacements(value: unknown) {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value
+      .map((item) => {
+        const candidate = item as { from?: unknown; to?: unknown };
+        const from =
+          typeof candidate.from === 'string'
+            ? this.cleanFoodTerm(candidate.from)
+            : '';
+        const to =
+          typeof candidate.to === 'string'
+            ? this.cleanFoodTerm(candidate.to)
+            : '';
+
+        return { from, to };
+      })
+      .filter((rule) => rule.from && rule.to && rule.from !== rule.to);
+  }
+
+  private mergeFoodReplacementRules(
+    rules: Array<{ from: string; to: string }>,
+  ) {
+    const unique = new Map<string, { from: string; to: string }>();
+
+    rules.forEach((rule) => {
+      unique.set(`${rule.from}->${rule.to}`, rule);
+    });
+
+    return Array.from(unique.values());
+  }
+
+  private splitFoodTerms(value: string) {
+    return value
+      .split(/,| і | и | та |\/|\+/i)
+      .map((item) => this.cleanFoodTerm(item))
+      .filter(Boolean);
+  }
+
+  private cleanFoodTerm(value: string) {
+    return value
+      .toLowerCase()
+      .replace(/[.!?;:()[\]{}"«»]/g, ' ')
+      .replace(
+        /\b(везде|усюди|всюди|весь|весь план|план|меню|блюдах|стравах|еде|їжі|пожалуйста|будь ласка|замени|заменить|поменяй|поменять|заміни|замінити|поміняй|поміняти|добавь|добавить|додай|додати|вместо|замість|на|не|люблю|нравится|подобається|хочу|їм|ем|убери|прибери|исключи|виключи)\b/gi,
+        ' ',
+      )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+  }
+
+  private matchesFoodTerm(value: string, term: string) {
+    const normalizedValue = this.normalizeFoodComparable(value);
+    const normalizedTerm = this.normalizeFoodComparable(term);
+
+    if (!normalizedTerm) {
+      return false;
+    }
+
+    if (normalizedValue.includes(normalizedTerm)) {
+      return true;
+    }
+
+    const termRoot = this.getFoodTermRoot(normalizedTerm);
+
+    return termRoot.length >= 4 && normalizedValue.includes(termRoot);
+  }
+
+  private replaceFoodTermInText(
+    value: string,
+    replacement: { from: string; to: string },
+  ) {
+    const displayName = this.toFoodDisplayName(replacement.to);
+
+    if (this.matchesFoodTerm(value, replacement.from)) {
+      return displayName;
+    }
+
+    return value;
+  }
+
+  private normalizeFoodComparable(value: string) {
+    return value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private getFoodTermRoot(value: string) {
+    return value
+      .split(' ')
+      .map((part) => part.replace(/[аеиіїоюяыь]+$/i, ''))
+      .join(' ')
+      .trim();
+  }
+
+  private toFoodDisplayName(value: string) {
+    const cleaned = this.cleanFoodTerm(value);
+
+    return cleaned
+      ? cleaned
+          .split(' ')
+          .map((part) => {
+            return part ? part[0].toLocaleUpperCase() + part.slice(1) : part;
+          })
+          .join(' ')
+      : value;
+  }
+
+  private getForbiddenNutritionTerms(preference: string) {
+    const normalized = preference.toLowerCase();
+    const allergyMarkers = [
+      'алергі',
+      'алерг',
+      'аллерг',
+      'не можна',
+      'нельзя',
+      'без ',
+      'убери',
+      'прибери',
+      'исключи',
+      'виключи',
+      'не їм',
+      'не ем',
+      'не люблю',
+    ];
+    const hasRestriction = allergyMarkers.some((marker) =>
+      normalized.includes(marker),
+    );
+
+    if (!hasRestriction) {
+      return [];
+    }
+
+    const groups = [
+      {
+        triggers: ['орех', 'оріх', 'горіх', 'горех'],
+        terms: [
+          'орех',
+          'оріх',
+          'горіх',
+          'горех',
+          'мигдаль',
+          'миндаль',
+          'арахіс',
+          'арахис',
+          'кешью',
+          'фундук',
+          'лісовий горіх',
+          'лесной орех',
+          'волоський горіх',
+          'грецкий орех',
+          'фісташ',
+          'фисташ',
+          'пекан',
+        ],
+      },
+      {
+        triggers: ['молоч', 'молок', 'лактоз', 'сир', 'творог', 'йогурт'],
+        terms: ['молок', 'молоч', 'лактоз', 'сир', 'творог', 'йогурт'],
+      },
+      {
+        triggers: ['рыб', 'риба', 'лосос', 'тунец', 'тунець', 'тріск', 'треск'],
+        terms: ['рыб', 'риба', 'лосос', 'тунец', 'тунець', 'тріск', 'треск'],
+      },
+      {
+        triggers: ['яйц', 'яєц'],
+        terms: ['яйц', 'яєц'],
+      },
+      {
+        triggers: ['куриц', 'курк', 'куряч'],
+        terms: ['куриц', 'курк', 'куряч'],
+      },
+    ];
+    const matchedTerms = groups.flatMap((group) => {
+      return group.triggers.some((trigger) => normalized.includes(trigger))
+        ? group.terms
+        : [];
+    });
+
+    return Array.from(
+      new Set([
+        ...matchedTerms,
+        ...this.extractDislikedFoodTerms(preference),
+      ]),
+    );
+  }
+
+  private extractDislikedFoodTerms(preference: string) {
+    const lines = preference
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const patterns = [
+      /(?:не\s+люблю|не\s+нравится|не\s+подобається|не\s+хочу|не\s+їм|не\s+ем|алергія\s+на|аллергия\s+на|алергия\s+на|без|убери|прибери|исключи|виключи|прибрати|убрать)\s+(.+)/i,
+      /(.+?)\s+(?:не\s+люблю|не\s+нравится|не\s+подобається|не\s+хочу|не\s+їм|не\s+ем|не\s+заходит)/i,
+    ];
+    const terms = lines.flatMap((line) => {
+      return patterns.flatMap((pattern) => {
+        const match = line.match(pattern);
+
+        if (!match?.[1]) {
+          return [];
+        }
+
+        return this.splitFoodTerms(match[1]);
+      });
+    });
+
+    return Array.from(new Set(terms)).filter((term) => {
+      return term.length >= 3 && !this.isNonFoodPreferenceTerm(term);
+    });
+  }
+
+  private isNonFoodPreferenceTerm(term: string) {
+    const stopTerms = [
+      'это',
+      'це',
+      'его',
+      'його',
+      'там',
+      'тут',
+      'тоже',
+      'теж',
+      'все',
+      'всё',
+      'усе',
+      'везде',
+      'усюди',
+    ];
+
+    return stopTerms.includes(term);
+  }
+
+  private containsForbiddenTerm(value: string, forbiddenTerms: string[]) {
+    const normalized = value.toLowerCase();
+
+    return forbiddenTerms.some((term) => normalized.includes(term));
+  }
+
+  private getSafeFoodReplacement(mealType: string, calories: number) {
+    const targetCalories = Math.max(80, Math.round(calories || 180));
+    const normalizedMealType = mealType.toLowerCase();
+
+    if (normalizedMealType.includes('breakfast')) {
+      return {
+        name: 'Ягоди та насіння льону',
+        grams: 120,
+        calories: targetCalories,
+      };
+    }
+
+    if (normalizedMealType.includes('snack')) {
+      return {
+        name: 'Яблуко з насінням гарбуза',
+        grams: 140,
+        calories: targetCalories,
+      };
+    }
+
+    return {
+      name: 'Овочевий салат з оливковою олією',
+      grams: 180,
+      calories: targetCalories,
+    };
+  }
+
+  private getSafeDishName(mealType: string) {
+    const normalizedMealType = mealType.toLowerCase();
+
+    if (normalizedMealType.includes('breakfast')) {
+      return 'Сніданок з ягодами та насінням';
+    }
+
+    if (normalizedMealType.includes('snack')) {
+      return 'Фруктовий перекус';
+    }
+
+    return 'Збалансована страва без обмежених продуктів';
+  }
+
+  private normalizeNutritionMealPatch(patch: unknown) {
+    if (!patch || typeof patch !== 'object') {
+      return null;
+    }
+
+    const candidate = patch as {
+      dayNumber?: unknown;
+      mealIndex?: unknown;
+      mealType?: unknown;
+      dishName?: unknown;
+      foods?: unknown[];
+    };
+    const dayNumber = Number(candidate.dayNumber);
+    const mealIndex = Number(candidate.mealIndex);
+    const foods = Array.isArray(candidate.foods)
+      ? candidate.foods
+          .map((food) => {
+            const foodCandidate = food as {
+              name?: unknown;
+              grams?: unknown;
+              calories?: unknown;
+            };
+
+            return {
+              name:
+                typeof foodCandidate.name === 'string'
+                  ? foodCandidate.name.trim()
+                  : '',
+              grams: Number(foodCandidate.grams),
+              calories: Number(foodCandidate.calories),
+            };
+          })
+          .filter((food) => {
+            return food.name && food.grams > 0 && food.calories >= 0;
+          })
+      : [];
+
+    if (
+      dayNumber < 1 ||
+      dayNumber > 28 ||
+      mealIndex < 0 ||
+      mealIndex > 3 ||
+      !foods.length ||
+      typeof candidate.dishName !== 'string'
+    ) {
+      return null;
+    }
+
+    return {
+      dayNumber,
+      mealIndex,
+      mealType:
+        typeof candidate.mealType === 'string' ? candidate.mealType : '',
+      dishName: candidate.dishName.trim(),
+      foods,
+    };
+  }
+
+  private hasExpectedNutritionPlanShape(nutritionPlan: unknown) {
+    const days = (nutritionPlan as { days?: unknown[] } | null)?.days;
+
+    if (!Array.isArray(days) || days.length !== 28) {
+      return false;
+    }
+
+    return days.every((day, index) => {
+      const candidate = day as { dayNumber?: unknown; meals?: unknown[] };
+
+      return (
+        candidate?.dayNumber === index + 1 &&
+        Array.isArray(candidate.meals) &&
+        candidate.meals.length >= 3 &&
+        candidate.meals.every((meal) => {
+          const mealCandidate = meal as {
+            mealType?: unknown;
+            foods?: unknown[];
+          };
+
+          return (
+            typeof mealCandidate?.mealType === 'string' &&
+            Array.isArray(mealCandidate.foods) &&
+            mealCandidate.foods.length > 0 &&
+            mealCandidate.foods.every((food) => {
+              const foodCandidate = food as {
+                name?: unknown;
+                grams?: unknown;
+                calories?: unknown;
+              };
+
+              return (
+                typeof foodCandidate?.name === 'string' &&
+                Number(foodCandidate.grams) > 0 &&
+                Number(foodCandidate.calories) >= 0
+              );
+            })
+          );
+        })
+      );
+    });
+  }
+
   private isProfileChangedSinceProgram(payload: unknown, profile: AiProfile) {
     const currentSnapshot = this.buildProfileSnapshot(profile);
     const currentFingerprint = this.buildProfileFingerprint(currentSnapshot);
@@ -429,7 +1404,7 @@ ${question}
     options: {
       temperature: number;
       maxOutputTokens: number;
-      responseMimeType: 'text/plain';
+      responseMimeType: 'text/plain' | 'application/json';
     },
   ) {
     let lastMessage = '';

@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CreateProgressEntryDto } from './dto/create-progress-entry.dto';
 import { ProgressService } from './progress.service';
@@ -20,5 +28,11 @@ export class ProgressController {
     @Body() body: CreateProgressEntryDto,
   ) {
     return this.progressService.createEntry(req.user.userId, body);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('me')
+  resetMyEntries(@Req() req: { user: { userId: number; email: string } }) {
+    return this.progressService.resetMyEntries(req.user.userId);
   }
 }
