@@ -22,6 +22,30 @@ type AiFood = {
   name: string;
   grams: number;
   calories: number;
+  protein?: number;
+  fat?: number;
+  carbs?: number;
+};
+
+type AiNutritionLogEntry = {
+  dayNumber?: number | null;
+  dayLabel?: string;
+  mealType: string;
+  dishName: string;
+  description: string;
+  calories: number;
+  protein: number;
+  fat: number;
+  carbs: number;
+  foods: Array<{
+    name: string;
+    grams?: number | null;
+    calories?: number | null;
+    protein?: number | null;
+    fat?: number | null;
+    carbs?: number | null;
+  }>;
+  confidence?: number;
 };
 
 type AiProfile = NonNullable<
@@ -174,6 +198,17 @@ ${question}
       maxOutputTokens: 450,
       responseMimeType: 'text/plain',
     });
+    const nutritionEntry = await this.tryExtractNutritionLogEntrySafely(
+      profile,
+      question,
+    );
+
+    if (nutritionEntry) {
+      return {
+        answer: `${answer}\n\nЯ записав цей прийом їжі у фактичне харчування. Калорії приблизні, краще уточнити вагу порцій, якщо вона відома.`,
+        nutritionEntry,
+      };
+    }
 
     const updatedProgram = await this.tryApplyNutritionPreferenceFromChatSafely(
       userId,
@@ -190,6 +225,36 @@ ${question}
     }
 
     return { answer };
+  }
+
+  async analyzeNutritionEntryForUser(
+    userId: number,
+    text: string,
+    imageDataUrl?: string,
+  ) {
+    const profile = await this.profileService.getMyProfile(userId);
+    const normalizedText = text.trim();
+    const image = this.parseImageDataUrl(imageDataUrl);
+
+    if (!profile) {
+      throw new BadRequestException('Profile is required for nutrition entry');
+    }
+
+    if (!normalizedText && !image) {
+      throw new BadRequestException('Nutrition text or photo is required');
+    }
+
+    if (normalizedText.length > 1200) {
+      throw new BadRequestException('Nutrition text is too long');
+    }
+
+    const entry = await this.extractNutritionLogEntryFromText(
+      profile,
+      normalizedText,
+      image,
+    );
+
+    return { entry };
   }
 
   async generateProgramForUser(userId: number) {
@@ -351,6 +416,378 @@ ${question}
         savedProgramId: candidate.source?.savedProgramId ?? id,
         savedAt: candidate.source?.savedAt ?? createdAt,
       },
+    };
+  }
+
+  private async tryExtractNutritionLogEntrySafely(
+    profile: AiProfile,
+    message: string,
+  ) {
+    try {
+      if (!this.isNutritionLogMessage(message)) {
+        return null;
+      }
+
+      return await this.extractNutritionLogEntryFromText(profile, message);
+    } catch (error) {
+      this.logger.warn(
+        `Не вдалося розпізнати фактичне харчування з чату: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+
+      return null;
+    }
+  }
+
+  private isNutritionLogMessage(message: string) {
+    const normalized = message.toLowerCase();
+    const ateMarkers = [
+      'я поел',
+      'я поела',
+      'съел',
+      'съела',
+      'ел ',
+      'ела ',
+      'кушал',
+      'кушала',
+      'пообедал',
+      'пообедала',
+      'позавтракал',
+      'позавтракала',
+      'поужинал',
+      'поужинала',
+      'я їв',
+      'я їла',
+      'зʼїв',
+      "з'їв",
+      'зʼїла',
+      "з'їла",
+      'поснідав',
+      'поснідала',
+      'пообідав',
+      'пообідала',
+      'повечеряв',
+      'повечеряла',
+      'сьогодні їла',
+      'сегодня ела',
+      'сегодня ел',
+    ];
+    const placeOrFoodMarkers = [
+      'макдональд',
+      'mcdonald',
+      'бургер',
+      'картош',
+      'картоп',
+      'салат',
+      'суп',
+      'каша',
+      'рис',
+      'греч',
+      'куриц',
+      'курк',
+      'завтрак',
+      'снідан',
+      'обед',
+      'обід',
+      'ужин',
+      'вечер',
+      'перекус',
+    ];
+
+    return (
+      ateMarkers.some((marker) => normalized.includes(marker)) &&
+      placeOrFoodMarkers.some((marker) => normalized.includes(marker))
+    );
+  }
+
+  private async extractNutritionLogEntryFromText(
+    profile: AiProfile,
+    text: string,
+    image?: { mimeType: string; data: string },
+  ): Promise<AiNutritionLogEntry> {
+    const response = await this.generateTextStep(
+      image
+        ? 'AI аналіз фактичного харчування з фото'
+        : 'AI аналіз фактичного харчування',
+      `
+Розпізнай фактичний прийом їжі користувача і приблизно порахуй калорії.
+
+Профіль:
+- Вага: ${profile.weight} кг
+- Ціль: ${profile.goal}
+
+Текст користувача:
+${text || 'Користувач додав фото без текстового опису.'}
+
+${image ? 'Користувач також додав фото їжі. Визнач страви, порції, калорії і БЖУ за фото. Якщо текст і фото відрізняються, вважай текст уточненням до фото.' : ''}
+
+Правила:
+- Поверни тільки JSON без markdown.
+- Якщо аналізуєш фото і не впевнений у вазі порції, обери реалістичну середню порцію і знизь confidence.
+- Якщо день тижня вказаний словами, заповни dayLabel українською: "Понеділок", "Вівторок", "Середа", "Четвер", "Пʼятниця", "Субота", "Неділя".
+- Якщо можна логічно визначити dayNumber для тижневого плану: понеділок=1, вівторок=2, середа=3, четвер=4, пʼятниця=5, субота=6, неділя=7. Якщо дня немає, dayNumber=null.
+- mealType тільки один з: breakfast, lunch, dinner, snack. Якщо не ясно, вибери найімовірніший.
+- calories, protein, fat, carbs рахуй приблизно за реальними довідниками, особливо для ресторанів і фастфуду.
+- foods має містити 1-6 позицій з name, grams якщо можна оцінити, calories/protein/fat/carbs якщо можна оцінити.
+- Якщо користувач пише "меню", "menu", "комбо", "meal" у контексті McDonald's/KFC/іншого фастфуду, розпізнавай це як повний набір, а не один бургер: основна страва + картопля фрі + напій + соус, якщо користувач не уточнив інший склад.
+- confidence від 0 до 1.
+- Формат:
+{"dayNumber":1,"dayLabel":"Понеділок","mealType":"breakfast","dishName":"Назва прийому","description":"короткий опис","calories":650,"protein":28,"fat":31,"carbs":72,"foods":[{"name":"Бургер","grams":220,"calories":500,"protein":24,"fat":26,"carbs":45}],"confidence":0.7}
+`,
+      {
+        temperature: 0.2,
+        maxOutputTokens: 900,
+        responseMimeType: 'application/json',
+        image,
+      },
+    );
+    const parsed = (await this.parseOrRepairJson(
+      response,
+    )) as Partial<AiNutritionLogEntry>;
+
+    return this.normalizeNutritionLogEntry(parsed, text || 'Фото прийому їжі');
+  }
+
+  private parseImageDataUrl(imageDataUrl?: string) {
+    if (!imageDataUrl) {
+      return undefined;
+    }
+
+    if (imageDataUrl.length > 7_000_000) {
+      throw new BadRequestException('Nutrition photo is too large');
+    }
+
+    const match = imageDataUrl.match(
+      /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/,
+    );
+
+    if (!match) {
+      throw new BadRequestException('Nutrition photo format is not supported');
+    }
+
+    const mimeType = match[1] === 'image/jpg' ? 'image/jpeg' : match[1];
+
+    return {
+      mimeType,
+      data: match[2],
+    };
+  }
+
+  private normalizeNutritionLogEntry(
+    entry: Partial<AiNutritionLogEntry>,
+    fallbackText: string,
+  ): AiNutritionLogEntry {
+    const allowedMealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
+    const mealType = allowedMealTypes.includes(String(entry.mealType))
+      ? String(entry.mealType)
+      : 'snack';
+    const foods: AiNutritionLogEntry['foods'] = Array.isArray(entry.foods)
+      ? entry.foods
+          .map((food) => {
+            const candidate = food as {
+              name?: unknown;
+              grams?: unknown;
+              calories?: unknown;
+              protein?: unknown;
+              fat?: unknown;
+              carbs?: unknown;
+            };
+            const name =
+              typeof candidate.name === 'string' && candidate.name.trim()
+                ? candidate.name.trim()
+                : '';
+
+            if (!name) {
+              return null;
+            }
+
+            return {
+              name,
+              grams: Number.isFinite(Number(candidate.grams))
+                ? Math.max(0, Math.round(Number(candidate.grams)))
+                : null,
+              calories: Number.isFinite(Number(candidate.calories))
+                ? Math.max(0, Math.round(Number(candidate.calories)))
+                : null,
+              protein: Number.isFinite(Number(candidate.protein))
+                ? Math.max(0, Math.round(Number(candidate.protein)))
+                : null,
+              fat: Number.isFinite(Number(candidate.fat))
+                ? Math.max(0, Math.round(Number(candidate.fat)))
+                : null,
+              carbs: Number.isFinite(Number(candidate.carbs))
+                ? Math.max(0, Math.round(Number(candidate.carbs)))
+                : null,
+            };
+          })
+          .filter(
+            (
+              food,
+            ): food is {
+              name: string;
+              grams: number | null;
+              calories: number | null;
+              protein: number | null;
+              fat: number | null;
+              carbs: number | null;
+            } => Boolean(food),
+          )
+      : [];
+    const calories = Number.isFinite(Number(entry.calories))
+      ? Math.max(0, Math.round(Number(entry.calories)))
+      : foods.reduce((total, food) => total + Number(food?.calories ?? 0), 0);
+    const protein = Number.isFinite(Number(entry.protein))
+      ? Math.max(0, Math.round(Number(entry.protein)))
+      : foods.reduce((total, food) => total + Number(food?.protein ?? 0), 0);
+    const fat = Number.isFinite(Number(entry.fat))
+      ? Math.max(0, Math.round(Number(entry.fat)))
+      : foods.reduce((total, food) => total + Number(food?.fat ?? 0), 0);
+    const carbs = Number.isFinite(Number(entry.carbs))
+      ? Math.max(0, Math.round(Number(entry.carbs)))
+      : foods.reduce((total, food) => total + Number(food?.carbs ?? 0), 0);
+
+    const normalizedEntry: AiNutritionLogEntry = {
+      dayNumber:
+        Number.isFinite(Number(entry.dayNumber)) && Number(entry.dayNumber) > 0
+          ? Math.min(28, Math.round(Number(entry.dayNumber)))
+          : null,
+      dayLabel:
+        typeof entry.dayLabel === 'string' ? entry.dayLabel.trim() : '',
+      mealType,
+      dishName:
+        typeof entry.dishName === 'string' && entry.dishName.trim()
+          ? entry.dishName.trim().slice(0, 80)
+          : 'Фактичний прийом їжі',
+      description:
+        typeof entry.description === 'string' && entry.description.trim()
+          ? entry.description.trim().slice(0, 240)
+          : fallbackText.slice(0, 240),
+      calories,
+      protein,
+      fat,
+      carbs,
+      foods: foods.length
+        ? foods
+        : [
+            {
+              name: fallbackText.slice(0, 80),
+              grams: null,
+              calories,
+              protein,
+              fat,
+              carbs,
+            },
+          ],
+      confidence: Number.isFinite(Number(entry.confidence))
+        ? Math.max(0, Math.min(1, Number(entry.confidence)))
+        : 0.5,
+    };
+
+    return this.expandKnownRestaurantMenuEntry(normalizedEntry, fallbackText);
+  }
+
+  private expandKnownRestaurantMenuEntry(
+    entry: AiNutritionLogEntry,
+    sourceText: string,
+  ): AiNutritionLogEntry {
+    const normalized = sourceText.toLowerCase();
+    const isMcDonalds =
+      normalized.includes('мак') ||
+      normalized.includes('mcdonald') ||
+      normalized.includes('mc ');
+    const isMenu =
+      normalized.includes(' меню') ||
+      normalized.includes('menu') ||
+      normalized.includes('комбо') ||
+      normalized.includes('meal');
+    const isMcChicken =
+      normalized.includes('макчикен') ||
+      normalized.includes('макчікен') ||
+      normalized.includes('mcchicken') ||
+      normalized.includes('мак чикен') ||
+      normalized.includes('мак чікен');
+    const isSpicyMenu =
+      normalized.includes('лют') ||
+      normalized.includes('остр') ||
+      normalized.includes('spicy') ||
+      normalized.includes('пикант') ||
+      normalized.includes('пікант');
+
+    if (!isMcDonalds || !isMenu) {
+      return entry;
+    }
+
+    const mainItem = isMcChicken
+      ? {
+          name: 'МакЧікен',
+          grams: 190,
+          calories: 440,
+          protein: 15,
+          fat: 23,
+          carbs: 44,
+        }
+      : isSpicyMenu
+        ? {
+            name: 'Лютий бургер',
+            grams: 230,
+            calories: 560,
+            protein: 26,
+            fat: 31,
+            carbs: 45,
+          }
+        : {
+            name: entry.dishName || 'Основна страва McDonald’s',
+            grams: 220,
+            calories: Math.max(420, Math.round(Number(entry.calories) || 520)),
+            protein: Math.max(14, Math.round(Number(entry.protein) || 22)),
+            fat: Math.max(16, Math.round(Number(entry.fat) || 28)),
+            carbs: Math.max(35, Math.round(Number(entry.carbs) || 48)),
+          };
+
+    const foods = [
+      mainItem,
+      {
+        name: 'Картопля фрі середня',
+        grams: 115,
+        calories: 340,
+        protein: 4,
+        fat: 17,
+        carbs: 42,
+      },
+      {
+        name: 'Coca-Cola середня',
+        grams: 400,
+        calories: 170,
+        protein: 0,
+        fat: 0,
+        carbs: 42,
+      },
+      {
+        name: 'Соус',
+        grams: 25,
+        calories: 90,
+        protein: 0,
+        fat: 8,
+        carbs: 4,
+      },
+    ];
+    const dishName = isMcChicken
+      ? 'МакЧікен меню'
+      : isSpicyMenu
+        ? 'Люте меню McDonald’s'
+        : `${mainItem.name} меню`;
+
+    return {
+      ...entry,
+      dishName,
+      description: `${dishName} з картоплею фрі, Coca-Cola та соусом.`,
+      calories: foods.reduce((total, food) => total + food.calories, 0),
+      protein: foods.reduce((total, food) => total + food.protein, 0),
+      fat: foods.reduce((total, food) => total + food.fat, 0),
+      carbs: foods.reduce((total, food) => total + food.carbs, 0),
+      foods,
+      confidence: Math.max(entry.confidence ?? 0, 0.85),
     };
   }
 
@@ -1405,6 +1842,10 @@ ${currentSummary}
       temperature: number;
       maxOutputTokens: number;
       responseMimeType: 'text/plain' | 'application/json';
+      image?: {
+        mimeType: string;
+        data: string;
+      };
     },
   ) {
     let lastMessage = '';
@@ -1771,7 +2212,10 @@ ${currentSummary}
       );
 
       if (days.length === endDay - startDay + 1) {
-        return days;
+        return this.normalizeNutritionDaysToTargetCalories(
+          days,
+          hybridModel.regression.targetCalories,
+        );
       }
 
       throw new BadRequestException(
@@ -1820,7 +2264,10 @@ ${currentSummary}
       days.push(day);
     }
 
-    return days;
+    return this.normalizeNutritionDaysToTargetCalories(
+      days,
+      hybridModel.regression.targetCalories,
+    );
   }
 
   private buildTrainingPrompt(
@@ -1976,7 +2423,7 @@ ${currentSummary}
           "mealType": "breakfast | lunch | dinner | snack",
           "dishName": "string",
           "foods": [
-            { "name": "string", "grams": 150, "calories": 180 }
+            { "name": "string", "grams": 150, "calories": 180, "protein": 20, "fat": 8, "carbs": 12 }
           ]
         }
       ]
@@ -1987,18 +2434,89 @@ ${currentSummary}
 Вимоги:
 - ${dayRequirement}
 - На день 3-4 прийоми їжі.
-- Сумарну калорійність дня тримай близько ${hybridModel.regression.targetCalories} ккал.
+- Сумарна калорійність КОЖНОГО дня має бути РІВНО ${hybridModel.regression.targetCalories} ккал: ні більше, ні менше.
 - На день не повторюй mealType.
 - Кожен dishName має бути людською назвою страви, не списком інгредієнтів.
 - У назві страви не пиши "Сніданок", "Обід", "Вечеря", "Перекус".
-- Кожен foods item має name, grams і calories.
+- Кожен foods item має name, grams, calories, protein, fat, carbs.
 - calories — це реальні ккал саме для вказаної кількості grams, не за 100 г.
+- protein, fat, carbs — це грами БЖУ саме для вказаної кількості grams, не за 100 г.
 - calories має бути цілим числом більше 0 для всіх продуктів, крім води/чаю/кави без добавок.
 - Калорійність рахуй самостійно як AI за реальними харчовими довідниками.
 - Не використовуй id.
 - Не використовуй коментарі, одинарні лапки, trailing comma або markdown.
 - Variation token: ${variationToken}-${startDay}-${endDay}
 `;
+  }
+
+  private normalizeNutritionDaysToTargetCalories(
+    days: unknown[],
+    targetCalories: number,
+  ) {
+    const exactTargetCalories = Math.max(1200, Math.round(targetCalories));
+
+    return days.map((day) => {
+      if (!day || typeof day !== 'object') {
+        return day;
+      }
+
+      const normalizedDay = JSON.parse(JSON.stringify(day)) as {
+        meals?: Array<{ foods?: Array<Record<string, unknown>> }>;
+      };
+      const foods = (normalizedDay.meals ?? []).flatMap((meal) =>
+        Array.isArray(meal.foods) ? meal.foods : [],
+      );
+
+      if (!foods.length) {
+        return normalizedDay;
+      }
+
+      const currentCalories = foods.reduce(
+        (total, food) => total + Math.max(0, Math.round(Number(food.calories) || 0)),
+        0,
+      );
+      const scale = currentCalories > 0 ? exactTargetCalories / currentCalories : 1;
+
+      foods.forEach((food) => {
+        const calories = Math.max(0, Math.round(Number(food.calories) || 0));
+        const nextCalories = currentCalories > 0 ? Math.round(calories * scale) : 0;
+
+        food.calories = nextCalories;
+        food.protein = this.normalizeMacroValue(food.protein, nextCalories, 0.25);
+        food.fat = this.normalizeMacroValue(food.fat, nextCalories, 0.3);
+        food.carbs = this.normalizeMacroValue(food.carbs, nextCalories, 0.45);
+      });
+
+      const normalizedCalories = foods.reduce(
+        (total, food) => total + Math.max(0, Math.round(Number(food.calories) || 0)),
+        0,
+      );
+      const calorieDiff = exactTargetCalories - normalizedCalories;
+
+      if (calorieDiff !== 0) {
+        const lastFood = foods[foods.length - 1];
+        lastFood.calories = Math.max(
+          0,
+          Math.round(Number(lastFood.calories) || 0) + calorieDiff,
+        );
+      }
+
+      return normalizedDay;
+    });
+  }
+
+  private normalizeMacroValue(
+    value: unknown,
+    calories: number,
+    calorieShare: number,
+  ) {
+    if (Number.isFinite(Number(value)) && Number(value) > 0) {
+      return Math.max(0, Math.round(Number(value)));
+    }
+
+    const caloriesPerGram = calorieShare === 0.3 ? 9 : 4;
+
+    return Math.max(0, Math.round((calories * calorieShare) / caloriesPerGram));
   }
 
   private extractTrainingPlan(value: unknown) {
@@ -2274,7 +2792,7 @@ ${text}
 - Кожен trainingPlan.days item має 4-6 вправ.
 - nutritionPlan.days має містити рівно 28 днів, dayNumber від 1 до 28 без пропусків.
 - У кожному nutritionPlan day має бути 3-4 meals.
-- Кожен foods item має мати name, grams і calories для цієї кількості grams.
+- Кожен foods item має мати name, grams, calories, protein, fat і carbs для цієї кількості grams.
 - Збережи структуру trainingPlan, nutritionPlan, notes.
 - Не використовуй id, тільки назви вправ, страв та інгредієнтів.
 

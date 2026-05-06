@@ -19,6 +19,10 @@ type GenerateTextOptions = {
   temperature?: number;
   maxOutputTokens?: number;
   responseMimeType?: 'application/json' | 'text/plain';
+  image?: {
+    mimeType: string;
+    data: string;
+  };
 };
 
 @Injectable()
@@ -47,6 +51,16 @@ export class GeminiService {
                 {
                   text: prompt,
                 },
+                ...(options?.image
+                  ? [
+                      {
+                        inlineData: {
+                          mimeType: options.image.mimeType,
+                          data: options.image.data,
+                        },
+                      },
+                    ]
+                  : []),
               ],
             },
           ],

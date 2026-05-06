@@ -25,6 +25,19 @@ export class AiController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post('nutrition-entry/me')
+  analyzeNutritionEntry(
+    @Req() req: { user: { userId: number; email: string } },
+    @Body() body: { text?: string; imageDataUrl?: string },
+  ) {
+    return this.aiService.analyzeNutritionEntryForUser(
+      req.user.userId,
+      body.text ?? '',
+      body.imageDataUrl,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post('chat/me')
   chatWithAi(
     @Req() req: { user: { userId: number; email: string } },

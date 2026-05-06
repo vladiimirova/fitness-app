@@ -51,6 +51,67 @@ export function generateMyAiProgram(token: string) {
   return requestAiProgram(token, "POST");
 }
 
+export type AiNutritionEntry = {
+  dayNumber?: number | null;
+  dayLabel?: string;
+  mealType: string;
+  dishName: string;
+  description: string;
+  calories: number;
+  protein: number;
+  fat: number;
+  carbs: number;
+  foods: Array<{
+    name: string;
+    grams?: number | null;
+    calories?: number | null;
+    protein?: number | null;
+    fat?: number | null;
+    carbs?: number | null;
+  }>;
+  confidence?: number;
+};
+
+export async function analyzeNutritionEntry(
+  token: string,
+  text: string,
+  imageDataUrl?: string,
+) {
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_URL}/ai/nutrition-entry/me`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text, imageDataUrl }),
+    });
+  } catch {
+    throw new Error("Backend недоступний на localhost:3000");
+  }
+
+  if (!response.ok) {
+    let errorMessage = `Помилка аналізу харчування (${response.status})`;
+
+    try {
+      const data = await response.json();
+      if (typeof data?.message === "string") {
+        errorMessage = data.message;
+      } else if (Array.isArray(data?.message) && data.message.length) {
+        errorMessage = String(data.message[0]);
+      }
+    } catch {
+      // keep fallback
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  return response.json() as Promise<{ entry: AiNutritionEntry }>;
+}
+
 export async function sendAiChatMessage(
   token: string,
   message: string,
@@ -90,6 +151,7 @@ export async function sendAiChatMessage(
 
   return response.json() as Promise<{
     answer: string;
+    nutritionEntry?: AiNutritionEntry;
     updatedProgram?: unknown;
     programUpdated?: boolean;
   }>;

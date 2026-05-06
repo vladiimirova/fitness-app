@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FaBars, FaEllipsisH, FaTimes } from "react-icons/fa";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FaBars,
+  FaCalendarAlt,
+  FaEllipsisH,
+  FaImage,
+  FaPlus,
+  FaTimes,
+} from "react-icons/fa";
 import { Link, useNavigate } from "react-router-dom";
 import {
+  analyzeNutritionEntry,
   generateMyAiProgram,
   getMyAiProgram,
   sendAiChatMessage,
+  type AiNutritionEntry,
 } from "../../api/ai";
 import { getMyProfile } from "../../api/profile";
 import {
@@ -61,16 +70,20 @@ type FullTrainingPlan = {
   weeks: WeekPlan[];
 } | null;
 
-type DashboardTab = "training" | "nutrition" | "progress" | "chat";
+type DashboardTab = "training" | "nutrition" | "foodLog" | "progress" | "chat";
 type ProgressPeriod = "day" | "week" | "month";
 
 type MealIngredient = {
   name: string;
   grams: number;
   calories: number;
+  protein?: number | null;
+  fat?: number | null;
+  carbs?: number | null;
 };
 
 type MealItem = {
+  mealType?: string;
   title: string;
   text: string;
   ingredients: MealIngredient[];
@@ -84,6 +97,18 @@ type MealDayPlan = {
 type NutritionWeekPlan = {
   weekNumber: number;
   days: MealDayPlan[];
+};
+
+type NutritionLogEntry = AiNutritionEntry & {
+  id: string;
+  createdAt: string;
+  source: "plan" | "manual" | "chat";
+};
+
+type NutritionLogForm = {
+  dayNumber: string;
+  mealType: string;
+  text: string;
 };
 
 type ProgressForm = ProgressPayload;
@@ -148,6 +173,9 @@ type AiProgramResponse = {
             name?: string;
             grams: number;
             calories?: number;
+            protein?: number;
+            fat?: number;
+            carbs?: number;
           }>;
         }>;
       }>;
@@ -159,6 +187,7 @@ const avatarStorageKey = "profileAvatar";
 const progressStorageKey = "fitnessProgressEntries";
 const chatStorageKey = "fitnessAiChatMessages";
 const chatSessionsStorageKey = "fitnessAiChatSessions";
+const nutritionLogStorageKey = "fitnessNutritionLogEntries";
 const programCooldownDays = 28;
 
 function createChatSession(messages: ChatMessage[] = []): ChatSession {
@@ -261,6 +290,65 @@ function formatDate(date: Date | null) {
   return date.toLocaleDateString("uk-UA");
 }
 
+function getPlanDateForDay(startDate: Date, dayNumber: number) {
+  const date = new Date(startDate);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + dayNumber - 1);
+
+  return date;
+}
+
+function formatCalendarWeekday(date: Date) {
+  return date.toLocaleDateString("uk-UA", { weekday: "short" }).slice(0, 2);
+}
+
+function formatCalendarDay(date: Date) {
+  return date.toLocaleDateString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+  });
+}
+
+function formatCalendarMonth(date: Date) {
+  return date.toLocaleDateString("uk-UA", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function resizeImageFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const image = new Image();
+
+      image.onload = () => {
+        const maxSize = 1280;
+        const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("Canvas is not available"));
+          return;
+        }
+
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.82));
+      };
+
+      image.onerror = () => reject(new Error("Image cannot be loaded"));
+      image.src = String(reader.result || "");
+    };
+
+    reader.onerror = () => reject(new Error("File cannot be read"));
+    reader.readAsDataURL(file);
+  });
+}
+
 const progressPeriodLabels: Record<ProgressPeriod, string> = {
   day: "День",
   week: "Тиждень",
@@ -296,17 +384,33 @@ function DashboardPage() {
   const navigate = useNavigate();
   const token = localStorage.getItem("token") || "";
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const nutritionPhotoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [profileData, setProfileData] = useState<ProfileData>(null);
   const [avatar, setAvatar] = useState<string>("");
   const [fullPlan, setFullPlan] = useState<FullTrainingPlan>(null);
-  const [activeWeek, setActiveWeek] = useState<number>(1);
   const [loading, setLoading] = useState<boolean>(true);
   const [message, setMessage] = useState<string>("");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("training");
   const [activeNutritionWeek, setActiveNutritionWeek] = useState<number>(1);
   const [nutritionPlan, setNutritionPlan] = useState<NutritionWeekPlan[]>([]);
+  const [nutritionLogEntries, setNutritionLogEntries] = useState<
+    NutritionLogEntry[]
+  >([]);
+  const [nutritionLogForm, setNutritionLogForm] = useState<NutritionLogForm>({
+    dayNumber: "1",
+    mealType: "breakfast",
+    text: "",
+  });
+  const [nutritionPhotoDataUrl, setNutritionPhotoDataUrl] =
+    useState<string>("");
+  const [nutritionPhotoName, setNutritionPhotoName] = useState<string>("");
+  const [isNutritionCalendarOpen, setIsNutritionCalendarOpen] =
+    useState<boolean>(false);
+  const [nutritionLogMessage, setNutritionLogMessage] = useState<string>("");
+  const [isAnalyzingNutritionLog, setIsAnalyzingNutritionLog] =
+    useState<boolean>(false);
   const [isGeneratingProgram, setIsGeneratingProgram] =
     useState<boolean>(false);
   const [nextProgramUpdateAt, setNextProgramUpdateAt] = useState<Date | null>(
@@ -369,6 +473,17 @@ function DashboardPage() {
         if (storedProgress) {
           const parsedProgress = JSON.parse(storedProgress) as ProgressEntry[];
           setProgressEntries(parsedProgress);
+        }
+
+        const storedNutritionLog = localStorage.getItem(
+          nutritionLogStorageKey,
+        );
+
+        if (storedNutritionLog) {
+          const parsedNutritionLog = JSON.parse(
+            storedNutritionLog,
+          ) as NutritionLogEntry[];
+          setNutritionLogEntries(parsedNutritionLog);
         }
 
         const storedChatSessions = localStorage.getItem(chatSessionsStorageKey);
@@ -528,10 +643,6 @@ function DashboardPage() {
 
     setFullPlan(aiTraining);
 
-    if (aiTraining?.weeks?.length) {
-      setActiveWeek(aiTraining.weeks[0].weekNumber);
-    }
-
     if (aiNutrition.length) {
       setNutritionPlan(aiNutrition);
     } else {
@@ -639,6 +750,156 @@ function DashboardPage() {
     }
   }
 
+  function saveNutritionLogEntries(entries: NutritionLogEntry[]) {
+    const nextEntries = entries
+      .slice()
+      .sort((a, b) => {
+        const dayDiff = Number(a.dayNumber || 0) - Number(b.dayNumber || 0);
+
+        if (dayDiff !== 0) {
+          return dayDiff;
+        }
+
+        return a.createdAt.localeCompare(b.createdAt);
+      })
+      .slice(-80);
+
+    setNutritionLogEntries(nextEntries);
+    localStorage.setItem(nutritionLogStorageKey, JSON.stringify(nextEntries));
+  }
+
+  function addNutritionLogEntry(
+    entry: AiNutritionEntry,
+    source: NutritionLogEntry["source"],
+  ) {
+    const normalizedEntry: NutritionLogEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.floor(Math.random() * 100000)}`,
+      createdAt: new Date().toISOString(),
+      source,
+      dayNumber:
+        entry.dayNumber ?? (Number(nutritionLogForm.dayNumber || 0) || null),
+      mealType: entry.mealType || nutritionLogForm.mealType,
+      calories: Math.max(0, Math.round(Number(entry.calories) || 0)),
+      protein: Math.max(0, Math.round(Number(entry.protein) || 0)),
+      fat: Math.max(0, Math.round(Number(entry.fat) || 0)),
+      carbs: Math.max(0, Math.round(Number(entry.carbs) || 0)),
+      foods: entry.foods ?? [],
+    };
+    saveNutritionLogEntries([...nutritionLogEntries, normalizedEntry]);
+    return normalizedEntry;
+  }
+
+  async function handleAnalyzeNutritionLog() {
+    const text = nutritionLogForm.text.trim();
+
+    if ((!text && !nutritionPhotoDataUrl) || isAnalyzingNutritionLog) {
+      return;
+    }
+
+    try {
+      setIsAnalyzingNutritionLog(true);
+      setNutritionLogMessage("");
+      const response = await analyzeNutritionEntry(
+        token,
+        text,
+        nutritionPhotoDataUrl || undefined,
+      );
+      const entry = addNutritionLogEntry(
+        {
+          ...response.entry,
+          dayNumber: Number(nutritionLogForm.dayNumber || 0),
+          mealType: nutritionLogForm.mealType,
+        },
+        "manual",
+      );
+
+      setNutritionLogForm((current) => ({ ...current, text: "" }));
+      setNutritionPhotoDataUrl("");
+      setNutritionPhotoName("");
+      setProgressForm((current) => ({
+        ...current,
+        followedNutrition: true,
+      }));
+      setNutritionLogMessage(
+        `Записано: ${entry.dishName}, приблизно ${entry.calories || "—"} ккал`,
+      );
+    } catch (error) {
+      console.error(error);
+      setNutritionLogMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося проаналізувати харчування",
+      );
+    } finally {
+      setIsAnalyzingNutritionLog(false);
+    }
+  }
+
+  async function handleNutritionPhotoChange(
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setNutritionLogMessage("Оберіть фото їжі у форматі JPG, PNG або WebP");
+      return;
+    }
+
+    try {
+      const dataUrl = await resizeImageFile(file);
+      setNutritionPhotoDataUrl(dataUrl);
+      setNutritionPhotoName(file.name);
+      setNutritionLogMessage("Фото додано. AI врахує його під час розрахунку.");
+    } catch (error) {
+      console.error(error);
+      setNutritionLogMessage("Не вдалося додати фото");
+    }
+  }
+
+  function handleAcceptPlannedMeal(dayNumber: number, meal: MealItem) {
+    const entry = addNutritionLogEntry(
+      {
+        dayNumber,
+        dayLabel: `День ${dayNumber}`,
+        mealType: meal.mealType || getMealTypeFromTitle(meal.title),
+        dishName: meal.text,
+        description: `Зʼїдено за планом: ${meal.text}`,
+        calories: getMealCalories(meal),
+        protein: getMealProtein(meal),
+        fat: getMealFat(meal),
+        carbs: getMealCarbs(meal),
+        foods: meal.ingredients.map((ingredient) => ({
+          name: ingredient.name,
+          grams: ingredient.grams,
+          calories: getIngredientCalories(ingredient),
+          protein: getIngredientProtein(ingredient),
+          fat: getIngredientFat(ingredient),
+          carbs: getIngredientCarbs(ingredient),
+        })),
+        confidence: 1,
+      },
+      "plan",
+    );
+
+    setProgressForm((current) => ({
+      ...current,
+      followedNutrition: true,
+    }));
+    setNutritionLogMessage(`Додано за планом: ${entry.dishName}`);
+  }
+
+  function handleDeleteNutritionLogEntry(entryId: string) {
+    saveNutritionLogEntries(
+      nutritionLogEntries.filter((entry) => entry.id !== entryId),
+    );
+  }
+
   async function handleSendChatMessage() {
     const text = chatInput.trim();
 
@@ -691,6 +952,21 @@ function DashboardPage() {
           setActiveNutritionWeek(1);
           setActiveTab("nutrition");
           setMessage("План харчування оновлено за побажанням із чату");
+        }
+      }
+      if (response.nutritionEntry) {
+        const entry = addNutritionLogEntry(response.nutritionEntry, "chat");
+        setProgressForm((current) => ({
+          ...current,
+          followedNutrition: true,
+        }));
+        setNutritionLogMessage(
+          `З чату записано: ${entry.dishName}, приблизно ${
+            entry.calories || "—"
+          } ккал`,
+        );
+        if (!didUpdateNutritionPlan) {
+          setActiveTab("foodLog");
         }
       }
 
@@ -932,10 +1208,134 @@ function DashboardPage() {
     return Math.max(0, Math.round(Number(ingredient.calories) || 0));
   }
 
+  function getIngredientProtein(ingredient: MealIngredient) {
+    const protein = Number(ingredient.protein);
+
+    if (Number.isFinite(protein) && protein > 0) {
+      return Math.max(0, Math.round(protein));
+    }
+
+    return Math.max(0, Math.round((getIngredientCalories(ingredient) * 0.25) / 4));
+  }
+
+  function getIngredientFat(ingredient: MealIngredient) {
+    const fat = Number(ingredient.fat);
+
+    if (Number.isFinite(fat) && fat > 0) {
+      return Math.max(0, Math.round(fat));
+    }
+
+    return Math.max(0, Math.round((getIngredientCalories(ingredient) * 0.3) / 9));
+  }
+
+  function getIngredientCarbs(ingredient: MealIngredient) {
+    const carbs = Number(ingredient.carbs);
+
+    if (Number.isFinite(carbs) && carbs > 0) {
+      return Math.max(0, Math.round(carbs));
+    }
+
+    return Math.max(0, Math.round((getIngredientCalories(ingredient) * 0.45) / 4));
+  }
+
   function getMealCalories(meal: MealItem) {
     return meal.ingredients.reduce(function (total, ingredient) {
       return total + getIngredientCalories(ingredient);
     }, 0);
+  }
+
+  function getMealProtein(meal: MealItem) {
+    return meal.ingredients.reduce(function (total, ingredient) {
+      return total + getIngredientProtein(ingredient);
+    }, 0);
+  }
+
+  function getMealFat(meal: MealItem) {
+    return meal.ingredients.reduce(function (total, ingredient) {
+      return total + getIngredientFat(ingredient);
+    }, 0);
+  }
+
+  function getMealCarbs(meal: MealItem) {
+    return meal.ingredients.reduce(function (total, ingredient) {
+      return total + getIngredientCarbs(ingredient);
+    }, 0);
+  }
+
+  function getNutritionEntryProtein(entry: NutritionLogEntry) {
+    const protein = Number(entry.protein);
+
+    if (Number.isFinite(protein) && protein > 0) {
+      return Math.max(0, Math.round(protein));
+    }
+
+    return Math.max(0, Math.round(((Number(entry.calories) || 0) * 0.25) / 4));
+  }
+
+  function getNutritionEntryFat(entry: NutritionLogEntry) {
+    const fat = Number(entry.fat);
+
+    if (Number.isFinite(fat) && fat > 0) {
+      return Math.max(0, Math.round(fat));
+    }
+
+    return Math.max(0, Math.round(((Number(entry.calories) || 0) * 0.3) / 9));
+  }
+
+  function getNutritionEntryCarbs(entry: NutritionLogEntry) {
+    const carbs = Number(entry.carbs);
+
+    if (Number.isFinite(carbs) && carbs > 0) {
+      return Math.max(0, Math.round(carbs));
+    }
+
+    return Math.max(0, Math.round(((Number(entry.calories) || 0) * 0.45) / 4));
+  }
+
+  function getMealTypeFromTitle(title: string) {
+    const normalized = title.toLowerCase();
+
+    if (normalized.includes("снідан") || normalized.includes("завтрак")) {
+      return "breakfast";
+    }
+
+    if (normalized.includes("обід") || normalized.includes("обед")) {
+      return "lunch";
+    }
+
+    if (normalized.includes("вечер") || normalized.includes("ужин")) {
+      return "dinner";
+    }
+
+    return "snack";
+  }
+
+  function getMealTypeLabel(mealType: string) {
+    if (mealType === "breakfast") {
+      return "Сніданок";
+    }
+
+    if (mealType === "lunch") {
+      return "Обід";
+    }
+
+    if (mealType === "dinner") {
+      return "Вечеря";
+    }
+
+    return "Перекус";
+  }
+
+  function getNutritionEntrySourceLabel(source: NutritionLogEntry["source"]) {
+    if (source === "plan") {
+      return "за планом";
+    }
+
+    if (source === "chat") {
+      return "з чату";
+    }
+
+    return "додатково";
   }
 
   function getAiNutritionSummary() {
@@ -994,13 +1394,9 @@ function DashboardPage() {
 
   const activeWeekData = useMemo(
     function () {
-      return (
-        fullPlan?.weeks.find(function (week) {
-          return week.weekNumber === activeWeek;
-        }) || null
-      );
+      return fullPlan?.weeks[0] || null;
     },
-    [fullPlan, activeWeek],
+    [fullPlan],
   );
 
   const activeNutritionWeekData = useMemo(
@@ -1013,8 +1409,87 @@ function DashboardPage() {
     },
     [nutritionPlan, activeNutritionWeek],
   );
+  const allNutritionDays = useMemo(() => {
+    return nutritionPlan.flatMap((week) => week.days);
+  }, [nutritionPlan]);
+  const nutritionCalendarStartDate = useMemo(() => {
+    const date = programSavedAt ? new Date(programSavedAt) : new Date();
+    date.setHours(0, 0, 0, 0);
+
+    return date;
+  }, [programSavedAt]);
+  const nutritionCalendarDays = useMemo(() => {
+    return Array.from({ length: programCooldownDays }, (_, index) => {
+      const dayNumber = index + 1;
+      const date = getPlanDateForDay(nutritionCalendarStartDate, dayNumber);
+      const dayEntries = nutritionLogEntries.filter(
+        (entry) => entry.dayNumber === dayNumber,
+      );
+      const dayCalories = dayEntries.reduce(
+        (total, entry) => total + (Number(entry.calories) || 0),
+        0,
+      );
+
+      return {
+        dayNumber,
+        date,
+        weekday: formatCalendarWeekday(date),
+        dayLabel: formatCalendarDay(date),
+        entriesCount: dayEntries.length,
+        calories: dayCalories,
+      };
+    });
+  }, [nutritionCalendarStartDate, nutritionLogEntries]);
+  const selectedNutritionLogDayNumber = Number(nutritionLogForm.dayNumber);
+  const selectedNutritionCalendarDay =
+    nutritionCalendarDays.find((day) => {
+      return day.dayNumber === Number(nutritionLogForm.dayNumber);
+    }) ?? nutritionCalendarDays[0];
+  const selectedNutritionWeekStartIndex =
+    Math.floor((Math.max(1, selectedNutritionLogDayNumber) - 1) / 7) * 7;
+  const visibleNutritionWeekDays = nutritionCalendarDays.slice(
+    selectedNutritionWeekStartIndex,
+    selectedNutritionWeekStartIndex + 7,
+  );
+  const nutritionCalendarMonthTitle = formatCalendarMonth(
+    selectedNutritionCalendarDay?.date ?? nutritionCalendarStartDate,
+  );
+  function getNutritionDayLabel(dayNumber: number | null | undefined) {
+    if (!dayNumber) {
+      return "Без дня";
+    }
+
+    const calendarDay = nutritionCalendarDays.find((day) => {
+      return day.dayNumber === dayNumber;
+    });
+
+    if (!calendarDay) {
+      return `День ${dayNumber}`;
+    }
+
+    return `День ${dayNumber} · ${calendarDay.weekday} ${calendarDay.dayLabel}`;
+  }
+  const selectedNutritionLogDay = useMemo(() => {
+    return (
+      allNutritionDays.find(
+        (day) => day.dayNumber === Number(nutritionLogForm.dayNumber),
+      ) ?? null
+    );
+  }, [allNutritionDays, nutritionLogForm.dayNumber]);
 
   const nutritionSummary = getAiNutritionSummary();
+  const selectedNutritionLogEntries = nutritionLogEntries.filter((entry) => {
+    return entry.dayNumber === selectedNutritionLogDayNumber;
+  });
+  const selectedNutritionLogTotals = selectedNutritionLogEntries.reduce(
+    (totals, entry) => ({
+      calories: totals.calories + (Number(entry.calories) || 0),
+      protein: totals.protein + getNutritionEntryProtein(entry),
+      fat: totals.fat + getNutritionEntryFat(entry),
+      carbs: totals.carbs + getNutritionEntryCarbs(entry),
+    }),
+    { calories: 0, protein: 0, fat: 0, carbs: 0 },
+  );
   const visibleProgressEntries = useMemo(() => {
     return progressEntries.filter((entry) =>
       isEntryInProgressPeriod(entry, progressPeriod),
@@ -1329,6 +1804,20 @@ function DashboardPage() {
                 <button
                   type="button"
                   onClick={function () {
+                    setActiveTab("foodLog");
+                  }}
+                  className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+                    activeTab === "foodLog"
+                      ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
+                      : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+                  }`}
+                >
+                  Щоденник
+                </button>
+
+                <button
+                  type="button"
+                  onClick={function () {
                     setActiveTab("progress");
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
@@ -1367,6 +1856,13 @@ function DashboardPage() {
                       <p className="mt-1 text-sm text-slate-400">
                         {fullPlan?.plan?.title || "План ще не згенеровано"}
                       </p>
+                      {activeWeekData ? (
+                        <p className="mt-2 text-sm text-slate-300">
+                          Ваші {activeWeekData.days.length} тренування на
+                          тиждень повторюються 4 тижні. Виконання по датах
+                          відмічайте у вкладці прогресу.
+                        </p>
+                      ) : null}
                     </div>
 
                     <div className="flex flex-wrap gap-2">
@@ -1378,27 +1874,6 @@ function DashboardPage() {
                       >
                         {updateTrainingLabel}
                       </button>
-
-                      {fullPlan?.weeks.map(function (week) {
-                        const isActive = week.weekNumber === activeWeek;
-
-                        return (
-                          <button
-                            key={week.weekNumber}
-                            type="button"
-                            onClick={function () {
-                              setActiveWeek(week.weekNumber);
-                            }}
-                            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                              isActive
-                                ? "bg-gradient-to-r from-cyan-500 to-violet-500 text-white"
-                                : "border border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800"
-                            }`}
-                          >
-                            Тиждень {week.weekNumber}
-                          </button>
-                        );
-                      })}
                     </div>
                   </div>
 
@@ -1407,9 +1882,10 @@ function DashboardPage() {
                       План тренувань ще не створено.
                     </div>
                   ) : (
-                    <div className="mt-6 grid gap-5 md:grid-cols-2">
-                      {activeWeekData.days.map(function (day) {
-                        return (
+                    <>
+                      <div className="mt-6 grid gap-5 md:grid-cols-2">
+                        {activeWeekData.days.map(function (day) {
+                          return (
                           <div
                             key={day.dayNumber}
                             className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
@@ -1467,9 +1943,10 @@ function DashboardPage() {
                               })}
                             </div>
                           </div>
-                        );
-                      })}
-                    </div>
+                          );
+                        })}
+                      </div>
+                    </>
                   )}
                 </div>
               </section>
@@ -1486,9 +1963,9 @@ function DashboardPage() {
                       Орієнтир харчування на 4 тижні
                     </h3>
                     <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
-                      Усі цифри нижче беруться тільки з AI-плану харчування.
-                      Якщо план ще не сформовано, ми не показуємо локальні
-                      розрахунки замість AI.
+                      Ось ваш план харчування на кожен день. У вкладці
+                      щоденника відмічайте, що зʼїли за планом, або додавайте
+                      свої прийоми їжі.
                     </p>
                   </div>
                 </div>
@@ -1541,6 +2018,7 @@ function DashboardPage() {
                       поточний профіль
                     </p>
                   </div>
+
                 </div>
 
                 <div className="mt-6">
@@ -1589,7 +2067,7 @@ function DashboardPage() {
                             className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
                           >
                             <p className="text-xs uppercase tracking-wide text-cyan-300">
-                              День {day.dayNumber}
+                              {getNutritionDayLabel(day.dayNumber)}
                             </p>
 
                             <div className="mt-4 space-y-4">
@@ -1619,6 +2097,33 @@ function DashboardPage() {
                                       </div>
                                     </div>
 
+                                    <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                                      <div className="rounded-lg bg-slate-950/60 px-2 py-2">
+                                        <p className="text-sm font-semibold text-white">
+                                          {getMealProtein(meal) || "—"} г
+                                        </p>
+                                        <p className="text-xs text-slate-400">
+                                          Білки
+                                        </p>
+                                      </div>
+                                      <div className="rounded-lg bg-slate-950/60 px-2 py-2">
+                                        <p className="text-sm font-semibold text-white">
+                                          {getMealFat(meal) || "—"} г
+                                        </p>
+                                        <p className="text-xs text-slate-400">
+                                          Жири
+                                        </p>
+                                      </div>
+                                      <div className="rounded-lg bg-slate-950/60 px-2 py-2">
+                                        <p className="text-sm font-semibold text-white">
+                                          {getMealCarbs(meal) || "—"} г
+                                        </p>
+                                        <p className="text-xs text-slate-400">
+                                          Вуглеводи
+                                        </p>
+                                      </div>
+                                    </div>
+
                                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                                       {meal.ingredients.map(
                                         function (ingredient) {
@@ -1637,6 +2142,17 @@ function DashboardPage() {
                                                     ingredient,
                                                   )}{" "}
                                                   ккал
+                                                </span>
+                                                <span className="mt-1 block text-xs font-normal text-slate-500">
+                                                  Б {getIngredientProtein(
+                                                    ingredient,
+                                                  ) || "—"}{" "}
+                                                  · Ж {getIngredientFat(
+                                                    ingredient,
+                                                  ) || "—"}{" "}
+                                                  · В {getIngredientCarbs(
+                                                    ingredient,
+                                                  ) || "—"}
                                                 </span>
                                               </span>
                                             </div>
@@ -1658,6 +2174,455 @@ function DashboardPage() {
                     Вага вказана для сирого або готового продукту згідно з
                     назвою: “варений рис”, “варена гречка”, “овочі”.
                   </p>
+                </div>
+
+              </section>
+            ) : null}
+
+            {activeTab === "foodLog" ? (
+              <section className="mb-8 space-y-6">
+                <div className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm uppercase tracking-[0.2em] text-cyan-400/80">
+                        Щоденник харчування
+                      </p>
+                      <h3 className="mt-3 text-2xl font-bold text-white">
+                        Фактичне харчування
+                      </h3>
+                      <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300 sm:text-base">
+                        Тут зберігається те, що було зʼїдено насправді. Можна
+                        підтвердити страву з плану або внести свою їжу текстом,
+                        а AI приблизно порахує калорії.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 grid gap-4 md:grid-cols-3">
+                    <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
+                      <p className="text-xs uppercase tracking-wide text-cyan-200">
+                        Ккал за день
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold text-white">
+                        {selectedNutritionLogTotals.calories || "—"}
+                      </p>
+                      <p className="mt-1 text-xs text-cyan-100/80">
+                        вибраний день
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+                      <p className="text-xs uppercase tracking-wide text-slate-400">
+                        Білки / жири / вуглеводи
+                      </p>
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                        <div className="rounded-xl bg-slate-900 px-2 py-2">
+                          <p className="text-lg font-semibold text-white">
+                            {selectedNutritionLogTotals.protein || "—"}
+                          </p>
+                          <p className="text-xs text-slate-400">Б</p>
+                        </div>
+                        <div className="rounded-xl bg-slate-900 px-2 py-2">
+                          <p className="text-lg font-semibold text-white">
+                            {selectedNutritionLogTotals.fat || "—"}
+                          </p>
+                          <p className="text-xs text-slate-400">Ж</p>
+                        </div>
+                        <div className="rounded-xl bg-slate-900 px-2 py-2">
+                          <p className="text-lg font-semibold text-white">
+                            {selectedNutritionLogTotals.carbs || "—"}
+                          </p>
+                          <p className="text-xs text-slate-400">В</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-4">
+                      <p className="text-xs uppercase tracking-wide text-slate-400">
+                        Записів за день
+                      </p>
+                      <p className="mt-2 text-2xl font-semibold text-white">
+                        {selectedNutritionLogEntries.length || "—"}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        всього {nutritionLogEntries.length || 0}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-slate-400">
+                          {nutritionCalendarMonthTitle}
+                        </p>
+                        <h4 className="mt-1 text-base font-semibold text-white">
+                          {selectedNutritionCalendarDay
+                            ? `${selectedNutritionCalendarDay.weekday} ${selectedNutritionCalendarDay.dayLabel}`
+                            : "Календар"}
+                        </h4>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setIsNutritionCalendarOpen((current) => !current)
+                        }
+                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-sm text-cyan-100 transition hover:bg-white/10"
+                        aria-label={
+                          isNutritionCalendarOpen
+                            ? "Згорнути календар"
+                            : "Відкрити календар"
+                        }
+                      >
+                        <FaCalendarAlt aria-hidden="true" />
+                      </button>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-7 gap-2">
+                      {visibleNutritionWeekDays.map((calendarDay) => {
+                        const isSelected =
+                          selectedNutritionLogDayNumber ===
+                          calendarDay.dayNumber;
+
+                        return (
+                          <button
+                            key={calendarDay.dayNumber}
+                            type="button"
+                            onClick={() =>
+                              setNutritionLogForm((current) => ({
+                                ...current,
+                                dayNumber: String(calendarDay.dayNumber),
+                              }))
+                            }
+                            className={`rounded-xl border px-2 py-2 text-center transition ${
+                              isSelected
+                                ? "border-cyan-400 bg-cyan-400/15 text-white"
+                                : "border-white/10 bg-slate-950/60 text-slate-300 hover:border-cyan-400/50 hover:bg-cyan-400/10"
+                            }`}
+                          >
+                            <span className="block text-xs uppercase tracking-wide text-slate-400">
+                              {calendarDay.weekday}
+                            </span>
+                            <span className="mx-auto mt-1.5 flex h-8 w-8 items-center justify-center rounded-full bg-white/5 text-sm font-semibold">
+                              {calendarDay.date.getDate()}
+                            </span>
+                            <span className="mt-1.5 block text-[11px] text-slate-400">
+                              {calendarDay.entriesCount
+                                ? `${calendarDay.entriesCount} зап.`
+                                : "—"}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {isNutritionCalendarOpen ? (
+                      <div className="mt-3 grid grid-cols-7 gap-1.5 border-t border-white/10 pt-3">
+                        {nutritionCalendarDays.map((calendarDay) => {
+                          const isSelected =
+                            selectedNutritionLogDayNumber ===
+                            calendarDay.dayNumber;
+
+                          return (
+                            <button
+                              key={`full-${calendarDay.dayNumber}`}
+                              type="button"
+                              onClick={() => {
+                                setNutritionLogForm((current) => ({
+                                  ...current,
+                                  dayNumber: String(calendarDay.dayNumber),
+                                }));
+                                setIsNutritionCalendarOpen(false);
+                              }}
+                              className={`rounded-lg border px-2 py-1.5 text-center text-xs transition ${
+                                isSelected
+                                  ? "border-cyan-400 bg-cyan-400/15 text-white"
+                                  : "border-white/10 bg-slate-900 text-slate-300 hover:bg-white/10"
+                              }`}
+                            >
+                              <span className="block text-xs text-slate-400">
+                                {calendarDay.weekday}
+                              </span>
+                              <span className="mt-1 block font-semibold">
+                                {calendarDay.date.getDate()}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-6 rounded-2xl border border-white/10 bg-slate-950/60 p-5">
+                    <h4 className="text-lg font-semibold text-white">
+                      Внести прийом їжі
+                    </h4>
+
+                    <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end">
+                      <div className="grid flex-1 gap-3 sm:grid-cols-[9rem_11rem_1fr]">
+                        <label className="text-sm text-slate-300">
+                          День
+                          <select
+                            value={nutritionLogForm.dayNumber}
+                            onChange={(event) =>
+                              setNutritionLogForm((current) => ({
+                                ...current,
+                                dayNumber: event.target.value,
+                              }))
+                            }
+                            className="mt-2 h-11 w-full rounded-xl border border-white/10 bg-slate-900 px-3 pr-9 text-white outline-none focus:border-cyan-400"
+                          >
+                            {nutritionCalendarDays.map((calendarDay) => (
+                              <option
+                                key={calendarDay.dayNumber}
+                                value={calendarDay.dayNumber}
+                              >
+                                {calendarDay.weekday} {calendarDay.dayLabel}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="text-sm text-slate-300">
+                          Прийом
+                          <select
+                            value={nutritionLogForm.mealType}
+                            onChange={(event) =>
+                              setNutritionLogForm((current) => ({
+                                ...current,
+                                mealType: event.target.value,
+                              }))
+                            }
+                            className="mt-2 h-11 w-full rounded-xl border border-white/10 bg-slate-900 px-3 pr-9 text-white outline-none focus:border-cyan-400"
+                          >
+                            <option value="breakfast">Сніданок</option>
+                            <option value="lunch">Обід</option>
+                            <option value="dinner">Вечеря</option>
+                            <option value="snack">Перекус</option>
+                          </select>
+                        </label>
+
+                        <label className="text-sm text-slate-300">
+                          Що зʼїли
+                          <div className="relative mt-2">
+                            <input
+                              value={nutritionLogForm.text}
+                              onChange={(event) =>
+                                setNutritionLogForm((current) => ({
+                                  ...current,
+                                  text: event.target.value,
+                                }))
+                              }
+                              placeholder="Якщо зʼїли щось не по плану, опишіть прийом їжі"
+                              className="h-11 w-full rounded-xl border border-white/10 bg-slate-900 px-3 pr-12 text-white outline-none focus:border-cyan-400"
+                            />
+                            <input
+                              ref={nutritionPhotoInputRef}
+                              type="file"
+                              accept="image/*"
+                              onChange={handleNutritionPhotoChange}
+                              className="hidden"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                nutritionPhotoInputRef.current?.click()
+                              }
+                              className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-cyan-100"
+                              title="Додати фото їжі"
+                              aria-label="Додати фото їжі"
+                            >
+                              {nutritionPhotoDataUrl ? (
+                                <FaImage aria-hidden="true" />
+                              ) : (
+                                <FaPlus aria-hidden="true" />
+                              )}
+                            </button>
+                          </div>
+                        </label>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleAnalyzeNutritionLog}
+                        disabled={
+                          isAnalyzingNutritionLog ||
+                          (!nutritionLogForm.text.trim() &&
+                            !nutritionPhotoDataUrl)
+                        }
+                        className="h-11 rounded-xl bg-gradient-to-r from-cyan-500 to-violet-500 px-5 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isAnalyzingNutritionLog
+                          ? "AI рахує..."
+                          : "Внести фактичне"}
+                      </button>
+                    </div>
+
+                    {nutritionPhotoDataUrl ? (
+                      <div className="mt-3 flex items-center gap-3 rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-3">
+                        <img
+                          src={nutritionPhotoDataUrl}
+                          alt="Фото прийому їжі"
+                          className="h-16 w-16 rounded-lg object-cover"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-cyan-100">
+                            {nutritionPhotoName || "Фото їжі"}
+                          </p>
+                          <p className="mt-1 text-xs text-cyan-100/70">
+                            AI приблизно визначить страву, калорії та БЖУ за
+                            фото.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNutritionPhotoDataUrl("");
+                            setNutritionPhotoName("");
+                          }}
+                          className="rounded-lg border border-white/10 bg-white/5 p-2 text-slate-200 transition hover:bg-white/10"
+                          title="Прибрати фото"
+                          aria-label="Прибрати фото"
+                        >
+                          <FaTimes aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-3 min-h-8">
+                      <div
+                        className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                          nutritionLogMessage
+                            ? "border-cyan-500/20 bg-cyan-500/10 text-cyan-100 opacity-100"
+                            : "pointer-events-none border-transparent bg-transparent text-transparent opacity-0"
+                        }`}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        {nutritionLogMessage}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-[1fr_0.9fr]">
+                  <div className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+                    <h4 className="text-lg font-semibold text-white">
+                      Мої записи
+                    </h4>
+
+                    {selectedNutritionLogEntries.length ? (
+                      <div className="mt-4 grid gap-3">
+                        {selectedNutritionLogEntries
+                          .slice()
+                          .reverse()
+                          .map((entry) => (
+                            <div
+                              key={entry.id}
+                              className="rounded-2xl border border-white/10 bg-slate-950/60 p-4"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-xs uppercase tracking-wide text-slate-400">
+                                    {getNutritionDayLabel(entry.dayNumber)} ·{" "}
+                                    {getMealTypeLabel(entry.mealType)} ·{" "}
+                                    {getNutritionEntrySourceLabel(entry.source)}
+                                  </p>
+                                  <p className="mt-1 text-sm font-semibold text-white">
+                                    {entry.dishName}
+                                  </p>
+                                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                                    {entry.description}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                    <span className="rounded-lg bg-cyan-500/10 px-2.5 py-1 text-xs font-semibold text-cyan-100">
+                                      {entry.calories || "—"} ккал
+                                    </span>
+                                    <span className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-slate-300">
+                                      Б {getNutritionEntryProtein(entry) || "—"} г
+                                    </span>
+                                    <span className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-slate-300">
+                                      Ж {getNutritionEntryFat(entry) || "—"} г
+                                    </span>
+                                    <span className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs text-slate-300">
+                                      В {getNutritionEntryCarbs(entry) || "—"} г
+                                    </span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteNutritionLogEntry(entry.id)
+                                    }
+                                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:bg-white/10 hover:text-white"
+                                  >
+                                    Видалити
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm leading-6 text-slate-400">
+                        За вибраний день записів поки немає. Додайте свій
+                        прийом їжі або натисніть “Додати з плану” в сусідньому
+                        блоці.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+                    <h4 className="text-lg font-semibold text-white">
+                      Сьогодні за планом
+                    </h4>
+                    <p className="mt-2 text-sm leading-6 text-slate-400">
+                      Швидко додайте запланований прийом у фактичний щоденник.
+                    </p>
+
+                    {selectedNutritionLogDay?.meals.length ? (
+                      <div className="mt-4 space-y-3">
+                        {selectedNutritionLogDay.meals.map((meal) => (
+                          <div
+                            key={`quick-${meal.title}`}
+                            className="rounded-2xl border border-white/10 bg-slate-950/60 p-3"
+                          >
+                            <p className="text-xs uppercase tracking-wide text-slate-400">
+                              {getMealTypeLabel(
+                                meal.mealType ||
+                                  getMealTypeFromTitle(meal.title),
+                              )}
+                            </p>
+                            <p className="mt-1 text-sm font-semibold text-white">
+                              {meal.title}
+                            </p>
+                            <p className="mt-1 text-xs leading-5 text-slate-400">
+                              {meal.text}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleAcceptPlannedMeal(
+                                  selectedNutritionLogDay.dayNumber,
+                                  meal,
+                                )
+                              }
+                              className="mt-3 rounded-xl border border-cyan-500/25 bg-cyan-400/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:border-cyan-400/50 hover:bg-cyan-400/15"
+                            >
+                              Додати з плану
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-4 rounded-2xl border border-white/10 bg-slate-950/60 p-4 text-sm text-slate-400">
+                        Спочатку сформуйте AI-план харчування.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </section>
             ) : null}
@@ -2317,16 +3282,6 @@ function buildTrainingPlanFromAiProgram(
       };
     });
 
-  const weeks = Array.from({ length: 4 }, function (_, weekIndex) {
-    return {
-      weekNumber: weekIndex + 1,
-      days: weekDays.map((day) => ({
-        dayNumber: day.dayNumber,
-        exercises: day.exercises.map((exercise) => ({ ...exercise })),
-      })),
-    };
-  });
-
   return {
     plan: {
       id: 0,
@@ -2334,7 +3289,12 @@ function buildTrainingPlanFromAiProgram(
       title,
       createdAt: new Date().toISOString(),
     },
-    weeks,
+    weeks: [
+      {
+        weekNumber: 1,
+        days: weekDays,
+      },
+    ],
   };
 }
 
@@ -2379,6 +3339,9 @@ function buildNutritionPlanFromAiProgram(
           ),
           grams: Math.max(1, Math.round(food.grams)),
           calories: Math.max(0, Math.round(Number(food.calories) || 0)),
+          protein: Math.max(0, Math.round(Number(food.protein) || 0)),
+          fat: Math.max(0, Math.round(Number(food.fat) || 0)),
+          carbs: Math.max(0, Math.round(Number(food.carbs) || 0)),
         }));
 
         const dishName = meal.dishName?.trim() ?? "";
@@ -2395,6 +3358,7 @@ function buildNutritionPlanFromAiProgram(
         );
 
         return {
+          mealType,
           title: finalDishName,
           text: ingredients.length
             ? ingredients.map((item) => item.name).join(", ")
@@ -2415,8 +3379,8 @@ function buildNutritionPlanFromAiProgram(
 
     return {
       weekNumber: weekIndex + 1,
-      days: weekDays.map((day, dayIndex) => ({
-        dayNumber: dayIndex + 1,
+      days: weekDays.map((day) => ({
+        dayNumber: day.dayNumber,
         meals: day.meals.map((meal) => ({
           ...meal,
           ingredients: meal.ingredients.map((ingredient) => ({
